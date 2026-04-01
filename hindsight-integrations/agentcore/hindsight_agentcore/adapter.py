@@ -141,7 +141,9 @@ class HindsightRuntimeAdapter:
         self._retain_async = config.retain_async if config else True
         self._timeout = config.timeout if config else 15.0
         self._default_tags = config.tags if config else []
-        self._verbose = verbose if verbose is not None else (config.verbose if config else False)
+        self._verbose = (
+            verbose if verbose is not None else (config.verbose if config else False)
+        )
 
         # Thread-local storage for the Hindsight client
         self._local = threading.local()
@@ -213,7 +215,9 @@ class HindsightRuntimeAdapter:
 
         except Exception:
             # Graceful degradation — memory is enhancement, not infrastructure
-            logger.warning("[Hindsight] Recall failed — continuing without memory", exc_info=True)
+            logger.warning(
+                "[Hindsight] Recall failed — continuing without memory", exc_info=True
+            )
             return ""
 
     async def after_turn(
@@ -354,7 +358,9 @@ class HindsightRuntimeAdapter:
 
         try:
             client = self._get_client()
-            document_id = context.request_id or f"{context.runtime_session_id}:{context.user_id}"
+            document_id = (
+                context.request_id or f"{context.runtime_session_id}:{context.user_id}"
+            )
 
             await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -369,7 +375,9 @@ class HindsightRuntimeAdapter:
             )
         except Exception:
             # Never surface retention failures to the user turn
-            logger.warning("[Hindsight] Retain failed — memory not stored", exc_info=True)
+            logger.warning(
+                "[Hindsight] Retain failed — memory not stored", exc_info=True
+            )
 
 
 def _format_memories(results: list[Any]) -> str:

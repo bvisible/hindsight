@@ -101,9 +101,7 @@ def default_bank_resolver(context: TurnContext) -> str:
             "Ensure a trusted user identity is extracted from the AgentCore auth context."
         )
     if not context.agent_name or not context.agent_name.strip():
-        raise BankResolutionError(
-            "Cannot resolve bank ID: agent_name is required."
-        )
+        raise BankResolutionError("Cannot resolve bank ID: agent_name is required.")
 
     parts: list[str] = []
     if context.tenant_id:

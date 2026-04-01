@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -150,13 +150,17 @@ class TestAfterTurn:
     @pytest.mark.asyncio
     async def test_retains_result(self):
         adapter, mock_client = self._make_adapter()
-        await adapter.after_turn(_ctx(), result="Fixed the auth bug.", query="help with auth")
+        await adapter.after_turn(
+            _ctx(), result="Fixed the auth bug.", query="help with auth"
+        )
         mock_client.retain.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_retained_content_includes_user_message(self):
         adapter, mock_client = self._make_adapter()
-        await adapter.after_turn(_ctx(), result="Found the bug.", query="why is login broken?")
+        await adapter.after_turn(
+            _ctx(), result="Found the bug.", query="why is login broken?"
+        )
         call_kwargs = mock_client.retain.call_args[1]
         assert "why is login broken?" in call_kwargs["content"]
         assert "Found the bug." in call_kwargs["content"]
@@ -206,7 +210,9 @@ class TestRunTurn:
     def _make_adapter(self):
         adapter = HindsightRuntimeAdapter()
         mock_client = MagicMock()
-        mock_client.recall.return_value = _make_recall_response("Prior invoice issue resolved")
+        mock_client.recall.return_value = _make_recall_response(
+            "Prior invoice issue resolved"
+        )
         adapter._local.client = mock_client
         return adapter, mock_client
 
@@ -217,7 +223,9 @@ class TestRunTurn:
         async def my_agent(payload, memory_context):
             return {"output": "Handled the request."}
 
-        result = await adapter.run_turn(_ctx(), {"prompt": "help"}, agent_callable=my_agent)
+        result = await adapter.run_turn(
+            _ctx(), {"prompt": "help"}, agent_callable=my_agent
+        )
         assert result["output"] == "Handled the request."
 
     @pytest.mark.asyncio
@@ -229,7 +237,9 @@ class TestRunTurn:
             received_context.append(memory_context)
             return {"output": "done"}
 
-        await adapter.run_turn(_ctx(), {"prompt": "project status"}, agent_callable=my_agent)
+        await adapter.run_turn(
+            _ctx(), {"prompt": "project status"}, agent_callable=my_agent
+        )
         assert "Prior invoice issue resolved" in received_context[0]
 
     @pytest.mark.asyncio
@@ -239,7 +249,9 @@ class TestRunTurn:
         async def my_agent(payload, memory_context):
             return {"output": "Fixed the billing discrepancy."}
 
-        await adapter.run_turn(_ctx(), {"prompt": "invoice issue"}, agent_callable=my_agent)
+        await adapter.run_turn(
+            _ctx(), {"prompt": "invoice issue"}, agent_callable=my_agent
+        )
         mock_client.retain.assert_called_once()
         call_kwargs = mock_client.retain.call_args[1]
         assert "Fixed the billing discrepancy." in call_kwargs["content"]
