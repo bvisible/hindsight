@@ -338,6 +338,34 @@ def cmd_install(source_dir: Path, model: str | None = None) -> None:
     # Re-load openclaw.json *after* `agents add` ran — that command rewrites
     # the file too, so reusing the in-memory copy from before would clobber
     # the new agent registration.
+    #
+    # When the manifest declares a hindsight.bank but the harness.openclaw
+    # config doesn't set bankId, auto-wire it. With dynamicBankId=false the
+    # plugin otherwise defaults to "<prefix>-openclaw" and silently retains
+    # to the wrong bank — the one we never provisioned missions on.
+    # Force per-agent bank routing so multiple installed agents don't share
+    # one global bank. With dynamicBankGranularity=['agent'] the plugin
+    # derives the bank id from the session's resolved agentId at runtime,
+    # so installing a second agent doesn't clobber the first.
+    #
+    # NOTE: relies on issue #1046's skip-filter carve-out (PR #1054) so that
+    # agent:<id>:main webchat sessions actually reach the retain hook.
+    plugin_overrides = {
+        **plugin_overrides,
+        "dynamicBankId": True,
+        "dynamicBankGranularity": ["agent"],
+    }
+    plugin_overrides.pop("bankId", None)
+    bank_prefix = plugin_overrides.get("bankIdPrefix") or ""
+    derived_bank_id = f"{bank_prefix}-{name}" if bank_prefix else name
+    if bank_from_manifest and bank_from_manifest != derived_bank_id:
+        warn(
+            f"agent.yaml hindsight.bank='{bank_from_manifest}' but per-agent "
+            f"granularity will route this agent to '{derived_bank_id}' "
+            f"(set bankIdPrefix='{bank_from_manifest.rsplit('-', 1)[0] if '-' in bank_from_manifest else ''}' "
+            f"and rename the agent to '{bank_from_manifest.rsplit('-', 1)[-1]}' to match)"
+        )
+
     if plugin_overrides:
         cfg = load_openclaw_config()
         plugin_cfg = get_plugin_config(cfg)
@@ -369,12 +397,11 @@ def cmd_install(source_dir: Path, model: str | None = None) -> None:
     else:
         spec = read_yaml(setup_yaml_path)
         bank_spec = spec.get("bank") or {}
-        bank_id = bank_spec.get("id") or bank_from_manifest
-        if not bank_id:
-            die(
-                f"{setup_yaml_path.name}: bank.id missing and not derivable from agent.yaml"
-            )
-        upsert_bank(api_url, token, bank_id, bank_spec.get("name"))
+        # Provision missions on the bank the plugin will actually route to
+        # (derived from prefix + agentName), not whatever id the user wrote
+        # in setup/hindsight-config.yaml — those would silently disagree.
+        bank_id = derived_bank_id
+        upsert_bank(api_url, token, bank_id, bank_spec.get("name") or name)
 
         updates: dict[str, str] = {}
         for key in ("retain_mission", "observations_mission", "reflect_mission"):
