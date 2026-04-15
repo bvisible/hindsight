@@ -257,18 +257,27 @@ def get_commit_authors(commits: list[Commit]) -> dict[str, str]:
     return authors
 
 
-def _render_author_inline(login: str) -> str:
-    """Render a small inline avatar + handle link for an author."""
-    avatar = f"https://github.com/{login}.png?size=40"
-    return (
-        f'<a href="https://github.com/{login}" title="@{login}" '
-        f'target="_blank" rel="noopener noreferrer" '
-        f'style={{{{display: "inline-flex", alignItems: "center", gap: "4px", '
-        f'verticalAlign: "middle", textDecoration: "none"}}}}>'
-        f'<img src="{avatar}" alt="@{login}" width="20" height="20" '
-        f'style={{{{borderRadius: "50%", verticalAlign: "middle"}}}} />'
-        f' @{login}</a>'
+def _render_entry_meta(commit_id: str, commit_url: str, login: str | None) -> str:
+    """Render the muted metadata span (avatar + handle + commit hash) for an entry."""
+    parts: list[str] = [
+        '<span style={{fontSize: "0.85em", opacity: 0.7, marginLeft: "0.5em", '
+        'display: "inline-flex", alignItems: "center", gap: "6px", verticalAlign: "middle"}}>'
+    ]
+    if login:
+        avatar = f"https://github.com/{login}.png?size=40"
+        parts.append(
+            f'<a href="https://github.com/{login}" target="_blank" rel="noopener noreferrer" '
+            f'style={{{{display: "inline-flex", alignItems: "center", gap: "4px", textDecoration: "none"}}}}>'
+            f'<img src="{avatar}" alt="@{login}" width="16" height="16" '
+            f'style={{{{borderRadius: "50%"}}}} />@{login}</a>'
+        )
+        parts.append("<span>·</span>")
+    parts.append(
+        f'<a href="{commit_url}" target="_blank" rel="noopener noreferrer" '
+        f'style={{{{fontFamily: "var(--ifm-font-family-monospace, monospace)"}}}}>{commit_id}</a>'
     )
+    parts.append("</span>")
+    return "".join(parts)
 
 
 def analyze_commits_with_llm(
@@ -357,12 +366,9 @@ def build_changelog_markdown(
             lines.append("")
             for entry in cat_entries:
                 commit_url = f"{GITHUB_COMMIT_URL}/{entry.commit_id}"
-                author_suffix = ""
-                if authors:
-                    login = _lookup_author(entry.commit_id, authors)
-                    if login:
-                        author_suffix = f" — {_render_author_inline(login)}"
-                lines.append(f"- {entry.summary} ([`{entry.commit_id}`]({commit_url})){author_suffix}")
+                login = _lookup_author(entry.commit_id, authors) if authors else None
+                meta = _render_entry_meta(entry.commit_id, commit_url, login)
+                lines.append(f"- {entry.summary} {meta}")
             lines.append("")
 
     if not has_entries:
