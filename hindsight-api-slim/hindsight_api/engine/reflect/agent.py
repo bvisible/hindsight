@@ -568,11 +568,6 @@ async def run_reflect_agent(
                 tools=tools,
                 scope="reflect_tool_call",
                 tool_choice=iter_tool_choice,
-                # The agent can short-circuit and return text directly from a
-                # tool-call iteration (see "No tool calls" branch below). Apply
-                # the same output cap as the forced-final paths so the answer
-                # respects max_tokens regardless of which iteration produced it.
-                max_completion_tokens=max_tokens,
             )
             llm_duration = int((time.time() - llm_start) * 1000)
             consecutive_errors = 0
