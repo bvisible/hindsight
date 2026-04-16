@@ -76,6 +76,8 @@ That stable layout is a bigger deal than it sounds. If the graph reflows randoml
 
 ### Entity Co-occurrence Graph (0.5.2)
 
+![Entity Co-occurrence Graph in the Hindsight control plane](/img/blog/hindsight-0-5-2-entity-graph.png)
+
 The Entity Co-occurrence Graph, added in Hindsight 0.5.2, complements Constellation View with a different lens: which entities appear together across the memories in a bank.
 
 Where Constellation View shows the typed relationship graph (semantic, temporal, causal, entity links), the Co-occurrence Graph shows empirical co-occurrence — which entities tend to cluster in the same facts. It makes it easy to spot people, projects, and tools that are tightly coupled in practice, and to navigate from any node into the memories that connect them.
