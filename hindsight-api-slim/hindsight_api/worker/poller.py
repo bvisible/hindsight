@@ -6,6 +6,7 @@ FOR UPDATE SKIP LOCKED for safe concurrent claiming.
 """
 
 import asyncio
+import hashlib
 import io
 import json
 import logging
@@ -132,7 +133,10 @@ class WorkerPoller:
         self._in_flight_by_type: dict[str, int] = {}
         # Rotation offset for per-tenant fair claiming. Advances past the last
         # schema we serviced so a busy tenant can't monopolize the poll order.
-        self._next_schema_idx: int = 0
+        # Seed from worker_id so workers don't all start at schema 0 on startup.
+        self._next_schema_idx: int = int.from_bytes(
+            hashlib.sha256(worker_id.encode()).digest()[:4], byteorder="big"
+        )
 
     async def _get_schemas(self) -> list[str | None]:
         """Get list of schemas to poll. Returns [None] for default schema (no prefix)."""
@@ -364,6 +368,20 @@ class WorkerPoller:
             logger.warning(f"Worker {self._worker_id} failed to claim tasks for schema {schema_display}: {e}")
             return []
 
+    @staticmethod
+    def _schema_advisory_lock_key(schema: str | None) -> int:
+        """Derive a stable advisory-lock key from a schema name.
+
+        Returns a signed 64-bit integer suitable for pg_try_advisory_xact_lock.
+        We use a hash of the schema string so different schemas never collide.
+        None (the default/public schema) maps to 0.
+        """
+        if schema is None:
+            return 0
+        # Take the first 8 bytes of the SHA-256 digest as a signed int64.
+        digest = hashlib.sha256(schema.encode()).digest()[:8]
+        return int.from_bytes(digest, byteorder="big", signed=True)
+
     async def _claim_batch_for_schema_inner(
         self, schema: str | None, non_consolidation_limit: int, consolidation_limit: int
     ) -> list[ClaimedTask]:
@@ -371,11 +389,27 @@ class WorkerPoller:
 
         Non-consolidation and consolidation pools are independent: each is bounded by
         its own limit and they do not borrow from each other.
+
+        Uses a per-schema advisory lock so that only one worker executes the
+        expensive FOR UPDATE SKIP LOCKED scan at a time. Workers that lose the
+        lock return immediately with an empty list — they will try again on the
+        next poll cycle.
         """
         table = fq_table("async_operations", schema)
 
         async with self._pool.acquire() as conn:
             async with conn.transaction():
+                # Try to acquire a transaction-scoped advisory lock for this
+                # schema. If another worker already holds it, skip immediately
+                # rather than running a redundant FOR UPDATE SKIP LOCKED scan.
+                lock_key = self._schema_advisory_lock_key(schema)
+                acquired = await conn.fetchval(
+                    "SELECT pg_try_advisory_xact_lock($1)",
+                    lock_key,
+                )
+                if not acquired:
+                    return []
+
                 # 1. Claim non-consolidation tasks
                 non_consolidation_rows = []
                 if non_consolidation_limit > 0:

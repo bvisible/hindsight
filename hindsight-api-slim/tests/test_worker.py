@@ -971,27 +971,24 @@ class TestConcurrentWorkers:
                 payload,
             )
 
-        # Create 3 workers that will claim tasks concurrently
-        workers_claimed: dict[str, list[str]] = {"worker-1": [], "worker-2": [], "worker-3": []}
+        # Create 3 workers that will claim tasks over multiple rounds.
+        # With the per-schema advisory lock only one worker can claim per
+        # schema per cycle, so we poll several rounds until all 10 tasks
+        # are drained — just like real polling behaviour.
+        pollers = {
+            wid: WorkerPoller(pool=pool, worker_id=wid, executor=lambda x: None)
+            for wid in ("worker-1", "worker-2", "worker-3")
+        }
+        all_claimed: list[str] = []
 
-        async def claim_for_worker(worker_id: str):
-            poller = WorkerPoller(
-                pool=pool,
-                worker_id=worker_id,
-                executor=lambda x: None,
-            )
-            claimed = await poller.claim_batch()
-            workers_claimed[worker_id] = [task.operation_id for task in claimed]
-
-        # Run all workers concurrently
-        await asyncio.gather(
-            claim_for_worker("worker-1"),
-            claim_for_worker("worker-2"),
-            claim_for_worker("worker-3"),
-        )
+        for _ in range(10):  # upper bound on rounds
+            round_results = await asyncio.gather(*(p.claim_batch() for p in pollers.values()))
+            round_ids = [t.operation_id for tasks in round_results for t in tasks]
+            all_claimed.extend(round_ids)
+            if len(all_claimed) >= 10:
+                break
 
         # Verify no duplicates - each task claimed by exactly one worker
-        all_claimed = workers_claimed["worker-1"] + workers_claimed["worker-2"] + workers_claimed["worker-3"]
         assert len(all_claimed) == len(set(all_claimed)), "Duplicate task claimed by multiple workers!"
 
         # Verify total claimed equals available tasks (10)
@@ -1004,9 +1001,9 @@ class TestConcurrentWorkers:
         )
         worker_assignments = {str(row["operation_id"]): row["worker_id"] for row in rows}
 
-        # With FOR UPDATE SKIP LOCKED, it's a race condition which workers get tasks.
-        # The important invariant is no duplicates and all tasks claimed, which we verified above.
-        # Just verify that at least 1 worker got tasks and all tasks have a worker assigned.
+        # The important invariant is no duplicates and all tasks claimed.
+        # With the advisory lock, at least 1 worker should have claimed tasks
+        # and all tasks must have a worker assigned.
         assert len(set(worker_assignments.values())) >= 1, "At least one worker should have claimed tasks"
         assert all(w is not None for w in worker_assignments.values()), "All tasks should have a worker assigned"
 
