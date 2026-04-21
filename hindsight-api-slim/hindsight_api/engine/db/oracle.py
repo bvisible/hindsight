@@ -535,17 +535,8 @@ class OracleConnection(DatabaseConnection):
 
         # Always use named params dict for Oracle
         params: dict[str, Any] = {}
-        input_sizes: dict[str, Any] = {}
         for i, val in enumerate(converted):
-            key = str(i + 1)
-            params[key] = val
-            # JSON-serialized values (from _convert_arg on list/dict) must be
-            # bound as CLOB — Oracle's thin driver defaults short strings to
-            # VARCHAR2 which fails when the target column is CLOB.
-            if isinstance(val, str) and val and val[0] in ("{", "["):
-                input_sizes[key] = oracledb.DB_TYPE_CLOB
-        if input_sizes:
-            cursor.setinputsizes(**input_sizes)
+            params[str(i + 1)] = val
 
         if returning_cols is not None:
             # Column names that are known to be numeric
@@ -573,6 +564,25 @@ class OracleConnection(DatabaseConnection):
                     params[f"ret_{i}"] = cursor.var(oracledb.DB_TYPE_VARCHAR, arraysize=1)
 
         return params
+
+    @staticmethod
+    def _apply_clob_input_sizes(cursor: Any, query: str, params: dict[str, Any] | None) -> None:
+        """Tell oracledb to bind JSON-shaped strings as CLOB.
+
+        Must be called AFTER _expand_any_lists so we only register sizes for
+        params that still exist in the final query. Oracle's thin driver
+        defaults short strings like '[]' to VARCHAR2 which fails with
+        ORA-00932 when the target column is CLOB.
+        """
+        if not params:
+            return
+        oracledb = _import_oracledb()
+        sizes: dict[str, Any] = {}
+        for key, val in params.items():
+            if isinstance(val, str) and val and val[0] in ("{", "[") and f":{key}" in query:
+                sizes[key] = oracledb.DB_TYPE_CLOB
+        if sizes:
+            cursor.setinputsizes(**sizes)
 
     _expand_counter = 0
 
@@ -705,6 +715,7 @@ class OracleConnection(DatabaseConnection):
         try:
             params = self._make_bind_params(cursor, args, ret_cols)
             query, params = self._expand_any_lists(query, params)
+            self._apply_clob_input_sizes(cursor, query, params)
             if ignore_dup:
                 try:
                     await cursor.execute(query, params)
@@ -800,6 +811,7 @@ class OracleConnection(DatabaseConnection):
         try:
             params = self._make_bind_params(cursor, args, ret_cols)
             query, params = self._expand_any_lists(query, params)
+            self._apply_clob_input_sizes(cursor, query, params)
             if ignore_dup:
                 try:
                     await cursor.execute(query, params)
@@ -839,6 +851,7 @@ class OracleConnection(DatabaseConnection):
         try:
             params = self._make_bind_params(cursor, args, ret_cols)
             query, params = self._expand_any_lists(query, params)
+            self._apply_clob_input_sizes(cursor, query, params)
             if ignore_dup:
                 try:
                     await cursor.execute(query, params)
@@ -878,6 +891,7 @@ class OracleConnection(DatabaseConnection):
         try:
             params = self._make_bind_params(cursor, args, ret_cols)
             query, params = self._expand_any_lists(query, params)
+            self._apply_clob_input_sizes(cursor, query, params)
             if ignore_dup:
                 try:
                     await cursor.execute(query, params)
