@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from ...config import get_config
 from ...worker.stage import set_stage
 from ..db_utils import acquire_with_retry
 from ..memory_engine import fq_table
@@ -750,23 +751,33 @@ async def _run_final_semantic_ann(
         chunk_embs = ann_embeddings[chunk_start:chunk_end]
         chunk_ftypes = ann_fact_types[chunk_start:chunk_end]
 
+        pool_stmt_timeout_s = get_config().db_statement_timeout
+
         async with ann_semaphore:
             t0 = time.time()
             async with acquire_with_retry(pool) as conn:
                 await conn.execute("SET statement_timeout = '300s'")
-                ann_links = await compute_semantic_links_ann(
-                    conn,
-                    bank_id,
-                    chunk_ids,
-                    chunk_embs,
-                    fact_types=chunk_ftypes,
-                    top_k=20,  # Recall uses at most 20 neighbors
-                    log_buffer=log_buffer,
-                )
-                if ann_links:
-                    await _bulk_insert_links(conn, ann_links, bank_id=bank_id)
-                chunk_link_counts[chunk_idx] = len(ann_links)
-                await conn.execute("RESET statement_timeout")
+                try:
+                    ann_links = await compute_semantic_links_ann(
+                        conn,
+                        bank_id,
+                        chunk_ids,
+                        chunk_embs,
+                        fact_types=chunk_ftypes,
+                        top_k=20,  # Recall uses at most 20 neighbors
+                        log_buffer=log_buffer,
+                    )
+                    if ann_links:
+                        await _bulk_insert_links(conn, ann_links, bank_id=bank_id)
+                    chunk_link_counts[chunk_idx] = len(ann_links)
+                finally:
+                    # Restore the pool's configured statement_timeout. RESET
+                    # would fall back to the Postgres server default, bypassing
+                    # the safety net set in the pool init hook.
+                    if pool_stmt_timeout_s > 0:
+                        await conn.execute(f"SET statement_timeout = '{pool_stmt_timeout_s}s'")
+                    else:
+                        await conn.execute("RESET statement_timeout")
             logger.info(
                 f"[streaming] Final ANN chunk {chunk_idx + 1}/{num_chunks}: "
                 f"{len(ann_links)} links in {time.time() - t0:.3f}s"
