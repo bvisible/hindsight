@@ -67,8 +67,7 @@ jobs:
 
     - name: Run perf tests
       run: |
-        cd hindsight-dev
-        uv run perf-test \
+        ./scripts/benchmarks/run-perf-test.sh \
           --scale ${{ inputs.scale || 'small' }} \
           --output perf-results.json
 
