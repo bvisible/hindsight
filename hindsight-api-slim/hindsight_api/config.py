@@ -178,6 +178,7 @@ ENV_EMBEDDINGS_TEI_URL = "HINDSIGHT_API_EMBEDDINGS_TEI_URL"
 ENV_EMBEDDINGS_OPENAI_API_KEY = "HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY"
 ENV_EMBEDDINGS_OPENAI_MODEL = "HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL"
 ENV_EMBEDDINGS_OPENAI_BASE_URL = "HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL"
+ENV_EMBEDDINGS_OPENAI_BATCH_SIZE = "HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE"
 
 # Gemini/Vertex AI embeddings configuration
 ENV_EMBEDDINGS_GEMINI_API_KEY = "HINDSIGHT_API_EMBEDDINGS_GEMINI_API_KEY"
@@ -375,6 +376,7 @@ ENV_DB_POOL_MIN_SIZE = "HINDSIGHT_API_DB_POOL_MIN_SIZE"
 ENV_DB_POOL_MAX_SIZE = "HINDSIGHT_API_DB_POOL_MAX_SIZE"
 ENV_DB_COMMAND_TIMEOUT = "HINDSIGHT_API_DB_COMMAND_TIMEOUT"
 ENV_DB_ACQUIRE_TIMEOUT = "HINDSIGHT_API_DB_ACQUIRE_TIMEOUT"
+ENV_DB_STATEMENT_TIMEOUT = "HINDSIGHT_API_DB_STATEMENT_TIMEOUT"
 
 # Worker configuration (distributed task processing)
 ENV_WORKER_ENABLED = "HINDSIGHT_API_WORKER_ENABLED"
@@ -383,7 +385,18 @@ ENV_WORKER_POLL_INTERVAL_MS = "HINDSIGHT_API_WORKER_POLL_INTERVAL_MS"
 ENV_WORKER_MAX_RETRIES = "HINDSIGHT_API_WORKER_MAX_RETRIES"
 ENV_WORKER_HTTP_PORT = "HINDSIGHT_API_WORKER_HTTP_PORT"
 ENV_WORKER_MAX_SLOTS = "HINDSIGHT_API_WORKER_MAX_SLOTS"
-ENV_WORKER_CONSOLIDATION_MAX_SLOTS = "HINDSIGHT_API_WORKER_CONSOLIDATION_MAX_SLOTS"
+
+# Per-operation-type slot reservations. Each entry maps an operation_type
+# (as stored in async_operations.operation_type) to its env var and default.
+# Adding a new operation type here is the ONLY change needed to make it
+# reservable via env var — config fields, from_env(), and the
+# worker_slot_reservations property all derive from this dict.
+WORKER_SLOT_RESERVATION_TYPES: dict[str, tuple[str, int]] = {
+    "consolidation": ("HINDSIGHT_API_WORKER_CONSOLIDATION_MAX_SLOTS", 2),
+    "retain": ("HINDSIGHT_API_WORKER_RETAIN_MAX_SLOTS", 0),
+    "file_convert_retain": ("HINDSIGHT_API_WORKER_FILE_CONVERT_RETAIN_MAX_SLOTS", 0),
+    "refresh_mental_model": ("HINDSIGHT_API_WORKER_REFRESH_MENTAL_MODEL_MAX_SLOTS", 0),
+}
 ENV_RETAIN_MAX_CONCURRENT = "HINDSIGHT_API_RETAIN_MAX_CONCURRENT"
 
 # Reflect agent settings
@@ -470,6 +483,7 @@ DEFAULT_EMBEDDINGS_LOCAL_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_EMBEDDINGS_LOCAL_FORCE_CPU = False  # Force CPU mode for local embeddings (avoids MPS/XPC issues on macOS)
 DEFAULT_EMBEDDINGS_LOCAL_TRUST_REMOTE_CODE = False  # Security: disabled by default, required for some models
 DEFAULT_EMBEDDINGS_OPENAI_MODEL = "text-embedding-3-small"
+DEFAULT_EMBEDDINGS_OPENAI_BATCH_SIZE = 100
 DEFAULT_EMBEDDINGS_GEMINI_MODEL = "gemini-embedding-001"
 DEFAULT_EMBEDDINGS_GEMINI_OUTPUT_DIMENSIONALITY = 768
 DEFAULT_EMBEDDING_DIMENSION = 384
@@ -596,6 +610,7 @@ DEFAULT_DB_POOL_MIN_SIZE = 5
 DEFAULT_DB_POOL_MAX_SIZE = 100
 DEFAULT_DB_COMMAND_TIMEOUT = 60  # seconds
 DEFAULT_DB_ACQUIRE_TIMEOUT = 30  # seconds
+DEFAULT_DB_STATEMENT_TIMEOUT = 600  # seconds (Postgres statement_timeout applied on every pool connection; 0 disables)
 
 # Worker configuration (distributed task processing)
 DEFAULT_WORKER_ENABLED = True  # API runs worker by default (standalone mode)
@@ -604,7 +619,6 @@ DEFAULT_WORKER_POLL_INTERVAL_MS = 500  # Poll database every 500ms
 DEFAULT_WORKER_MAX_RETRIES = 3  # Max retries before marking task failed
 DEFAULT_WORKER_HTTP_PORT = 8889  # HTTP port for worker metrics/health
 DEFAULT_WORKER_MAX_SLOTS = 10  # Total concurrent tasks per worker
-DEFAULT_WORKER_CONSOLIDATION_MAX_SLOTS = 2  # Max concurrent consolidation tasks per worker
 DEFAULT_RETAIN_MAX_CONCURRENT = 4  # Max concurrent retain DB phases (HNSW reads + writes). Limits I/O contention.
 
 # Reflect agent settings
@@ -725,6 +739,25 @@ class JsonFormatter(logging.Formatter):
 def _parse_str_list(value: str) -> list[str]:
     """Parse a comma-separated string into a non-empty list of stripped tokens."""
     return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def _parse_positive_int(name: str, raw: str | None, default: int) -> int:
+    """
+    Parse an env var that must be a positive integer (>= 1).
+
+    Falls back to ``default`` when unset/empty. Raises ValueError on non-integer
+    or non-positive values so misconfiguration fails fast instead of triggering
+    infinite loops or zero-step range() calls downstream.
+    """
+    if raw is None or raw == "":
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError as e:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from e
+    if parsed < 1:
+        raise ValueError(f"{name} must be >= 1, got {parsed}")
+    return parsed
 
 
 def _validate_extraction_mode(mode: str) -> str:
@@ -1036,6 +1069,7 @@ class HindsightConfig:
     db_pool_max_size: int
     db_command_timeout: int
     db_acquire_timeout: int
+    db_statement_timeout: int
 
     # Worker configuration (distributed task processing)
     worker_enabled: bool
@@ -1044,7 +1078,7 @@ class HindsightConfig:
     worker_max_retries: int
     worker_http_port: int
     worker_max_slots: int
-    worker_consolidation_max_slots: int
+    worker_slot_reservations: dict[str, int]
     retain_max_concurrent: int
 
     # Reflect agent settings
@@ -1070,6 +1104,10 @@ class HindsightConfig:
     webhook_secret: str | None  # HMAC signing secret (None = unsigned)
     webhook_event_types: list[str]  # Event types to deliver globally
     webhook_delivery_poll_interval_seconds: int  # How often the delivery worker polls
+
+    # Defaulted fields (source-compatible additions — existing direct constructor callers keep working).
+    # Keep at the end of the dataclass; Python forbids non-default fields after default fields.
+    embeddings_openai_batch_size: int = DEFAULT_EMBEDDINGS_OPENAI_BATCH_SIZE
 
     # Class-level sets for configuration categorization
 
@@ -1253,6 +1291,16 @@ class HindsightConfig:
                 f"provider: {self.retain_llm_provider or self.llm_provider})"
             )
 
+        # Validate that sum of per-operation slot reservations does not exceed max_slots
+        total_reserved = sum(self.worker_slot_reservations.values())
+        if total_reserved > self.worker_max_slots:
+            reservation_details = ", ".join(f"{k}={v}" for k, v in self.worker_slot_reservations.items() if v > 0)
+            raise ValueError(
+                f"Sum of per-operation slot reservations ({total_reserved}: {reservation_details}) "
+                f"exceeds worker_max_slots ({self.worker_max_slots}). "
+                f"Reduce reservations or increase HINDSIGHT_API_WORKER_MAX_SLOTS."
+            )
+
     @classmethod
     def from_env(cls) -> "HindsightConfig":
         """Create configuration from environment variables."""
@@ -1380,6 +1428,11 @@ class HindsightConfig:
             in ("true", "1"),
             embeddings_tei_url=os.getenv(ENV_EMBEDDINGS_TEI_URL),
             embeddings_openai_base_url=os.getenv(ENV_EMBEDDINGS_OPENAI_BASE_URL) or None,
+            embeddings_openai_batch_size=_parse_positive_int(
+                ENV_EMBEDDINGS_OPENAI_BATCH_SIZE,
+                os.getenv(ENV_EMBEDDINGS_OPENAI_BATCH_SIZE),
+                DEFAULT_EMBEDDINGS_OPENAI_BATCH_SIZE,
+            ),
             # Cohere embeddings (with backward-compatible fallback to shared API key)
             embeddings_cohere_api_key=os.getenv(ENV_EMBEDDINGS_COHERE_API_KEY) or os.getenv(ENV_COHERE_API_KEY),
             embeddings_cohere_model=os.getenv(ENV_EMBEDDINGS_COHERE_MODEL, DEFAULT_EMBEDDINGS_COHERE_MODEL),
@@ -1625,6 +1678,7 @@ class HindsightConfig:
             db_pool_max_size=int(os.getenv(ENV_DB_POOL_MAX_SIZE, str(DEFAULT_DB_POOL_MAX_SIZE))),
             db_command_timeout=int(os.getenv(ENV_DB_COMMAND_TIMEOUT, str(DEFAULT_DB_COMMAND_TIMEOUT))),
             db_acquire_timeout=int(os.getenv(ENV_DB_ACQUIRE_TIMEOUT, str(DEFAULT_DB_ACQUIRE_TIMEOUT))),
+            db_statement_timeout=int(os.getenv(ENV_DB_STATEMENT_TIMEOUT, str(DEFAULT_DB_STATEMENT_TIMEOUT))),
             # Worker configuration
             worker_enabled=os.getenv(ENV_WORKER_ENABLED, str(DEFAULT_WORKER_ENABLED)).lower() == "true",
             worker_id=os.getenv(ENV_WORKER_ID) or DEFAULT_WORKER_ID,
@@ -1632,9 +1686,11 @@ class HindsightConfig:
             worker_max_retries=int(os.getenv(ENV_WORKER_MAX_RETRIES, str(DEFAULT_WORKER_MAX_RETRIES))),
             worker_http_port=int(os.getenv(ENV_WORKER_HTTP_PORT, str(DEFAULT_WORKER_HTTP_PORT))),
             worker_max_slots=int(os.getenv(ENV_WORKER_MAX_SLOTS, str(DEFAULT_WORKER_MAX_SLOTS))),
-            worker_consolidation_max_slots=int(
-                os.getenv(ENV_WORKER_CONSOLIDATION_MAX_SLOTS, str(DEFAULT_WORKER_CONSOLIDATION_MAX_SLOTS))
-            ),
+            worker_slot_reservations={
+                op_type: int(os.getenv(env_var, str(default)))
+                for op_type, (env_var, default) in WORKER_SLOT_RESERVATION_TYPES.items()
+                if int(os.getenv(env_var, str(default))) > 0
+            },
             retain_max_concurrent=int(os.getenv(ENV_RETAIN_MAX_CONCURRENT, str(DEFAULT_RETAIN_MAX_CONCURRENT))),
             # Reflect agent settings
             reflect_max_iterations=int(os.getenv(ENV_REFLECT_MAX_ITERATIONS, str(DEFAULT_REFLECT_MAX_ITERATIONS))),

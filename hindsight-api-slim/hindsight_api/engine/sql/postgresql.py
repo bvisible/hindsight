@@ -150,6 +150,7 @@ class PostgreSQLDialect(SQLDialect):
         fetch_limit: int,
         tags_clause: str = "",
         groups_clause: str = "",
+        extra_where: str = "",
     ) -> str:
         return (
             f"(SELECT {cols},"
@@ -163,6 +164,7 @@ class PostgreSQLDialect(SQLDialect):
             f"   AND (1 - (embedding <=> {embedding_param}::vector)) >= 0.3"
             f"   {tags_clause}"
             f"   {groups_clause}"
+            f"   {extra_where}"
             f" ORDER BY embedding <=> {embedding_param}::vector"
             f" LIMIT {fetch_limit})"
         )
@@ -180,6 +182,7 @@ class PostgreSQLDialect(SQLDialect):
         groups_clause: str = "",
         arm_index: int = 0,
         text_search_extension: str = "native",
+        extra_where: str = "",
     ) -> str:
         if text_search_extension == "vchord":
             bm25_score_expr = (
@@ -207,6 +210,7 @@ class PostgreSQLDialect(SQLDialect):
             f"   {bm25_where_filter}"
             f"   {tags_clause}"
             f"   {groups_clause}"
+            f"   {extra_where}"
             f" ORDER BY {bm25_order_by}"
             f" LIMIT {limit_param})"
         )

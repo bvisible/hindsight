@@ -373,6 +373,7 @@ class SQLDialect(ABC):
         fetch_limit: int,
         tags_clause: str = "",
         groups_clause: str = "",
+        extra_where: str = "",
     ) -> str:
         """Build a semantic (vector similarity) search subquery arm.
 
@@ -388,6 +389,7 @@ class SQLDialect(ABC):
             fetch_limit: Max rows to fetch (over-fetched for HNSW approximation).
             tags_clause: Optional WHERE clause fragment for tag filtering.
             groups_clause: Optional WHERE clause fragment for tag group filtering.
+            extra_where: Optional additional WHERE clause fragment (e.g. time range filter).
         """
         ...
 
@@ -405,6 +407,7 @@ class SQLDialect(ABC):
         groups_clause: str = "",
         arm_index: int = 0,
         text_search_extension: str = "native",
+        extra_where: str = "",
     ) -> str:
         """Build a BM25/full-text search subquery arm.
 
@@ -424,6 +427,7 @@ class SQLDialect(ABC):
                        unique SCORE labels).
             text_search_extension: Full-text search backend ("native", "vchord",
                                    "pg_textsearch"). Only relevant for PostgreSQL.
+            extra_where: Optional additional WHERE clause fragment (e.g. time range filter).
         """
         ...
 

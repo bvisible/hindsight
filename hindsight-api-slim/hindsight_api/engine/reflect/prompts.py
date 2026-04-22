@@ -18,6 +18,9 @@ _TIKTOKEN_ENCODING = tiktoken.get_encoding("cl100k_base")
 # The remainder covers the system prompt, question, bank context, and output tokens.
 _FINAL_PROMPT_CONTEXT_FRACTION = 0.8
 
+_DEFAULT_ROLE = "You are a reflection agent that answers questions by reasoning over retrieved memories."
+_DEFAULT_FINAL_ROLE = "You are a thoughtful assistant that synthesizes answers from retrieved memories."
+
 
 def _extract_directive_rules(directives: list[dict[str, Any]]) -> list[str]:
     """Extract directive rules as a list of strings."""
@@ -133,7 +136,9 @@ def build_system_prompt_for_tools(
 
     parts.extend(
         [
-            "You are a reflection agent that answers questions by reasoning over retrieved memories.",
+            mission.strip() if mission else _DEFAULT_ROLE,
+            "",
+            "Answer the user's question by reasoning over retrieved memories.",
             "",
         ]
     )
@@ -369,7 +374,7 @@ def build_agent_prompt(
             output = entry["output"]
             # Format as proper JSON for LLM readability
             try:
-                output_str = json.dumps(output, indent=2, default=str)
+                output_str = json.dumps(output, indent=2, default=str, ensure_ascii=False)
             except (TypeError, ValueError):
                 output_str = str(output)
             parts.append(f"\n### Call {i}: {tool}\n```json\n{output_str}\n```")
@@ -444,7 +449,7 @@ def build_final_prompt(
             tool = entry["tool"]
             output = entry["output"]
             try:
-                output_str = json.dumps(output, indent=2, default=str)
+                output_str = json.dumps(output, indent=2, default=str, ensure_ascii=False)
             except (TypeError, ValueError):
                 output_str = str(output)
             block = f"\n### From {tool}:\n```json\n{output_str}\n```"
@@ -479,9 +484,9 @@ def build_final_prompt(
     return "\n".join(parts)
 
 
-FINAL_SYSTEM_PROMPT = """CRITICAL: You MUST ONLY use information from retrieved tool results. NEVER make up names, people, events, or entities.
+_FINAL_SYSTEM_PROMPT_BASE = """CRITICAL: You MUST ONLY use information from retrieved tool results. NEVER make up names, people, events, or entities.
 
-You are a thoughtful assistant that synthesizes answers from retrieved memories.
+{role_section}
 
 Your approach:
 - Reason over the retrieved memories to answer the question
@@ -510,41 +515,70 @@ Just provide the direct answer with proper markdown formatting.
 CRITICAL: This is a NON-CONVERSATIONAL system. NEVER ask follow-up questions, offer to search again, suggest alternatives, or end with anything like "Would you like me to..." or "Let me know if...". The user cannot reply. Your answer must be complete and self-contained."""
 
 
-STRUCTURED_DELTA_SYSTEM_PROMPT = """You are computing a *minimal patch* to a structured document.
+def build_final_system_prompt(mission: str | None = None) -> str:
+    """Build the final synthesis system prompt, using mission as role when set."""
+    role_section = mission.strip() if mission else _DEFAULT_FINAL_ROLE
+    return _FINAL_SYSTEM_PROMPT_BASE.format(role_section=role_section)
+
+
+# Backward-compatible constant for non-identity missions
+FINAL_SYSTEM_PROMPT = build_final_system_prompt()
+
+
+STRUCTURED_DELTA_SYSTEM_PROMPT = """You are integrating *new information* into an existing structured document.
 
 You will be given:
-1. CURRENT DOCUMENT (JSON) — the existing structured mental model. Each section
+1. TOPIC — the question this document answers. Content that does not help
+   answer this question is OFF-TOPIC and should be removed.
+2. CURRENT DOCUMENT (JSON) — the existing structured mental model. Each section
    has a stable ``id``, a ``heading``, a ``level`` (1..6), and an ordered list
    of ``blocks``. Blocks are typed: ``paragraph``, ``bullet_list``,
    ``ordered_list``, or ``code``.
-2. CANDIDATE SUMMARY (markdown) — a freshly generated synthesis of the latest
-   memories, useful only as a hint about *what new information exists*. You
-   MUST NOT copy its formatting or wording wholesale; it is not the target.
-3. SUPPORTING FACTS — the observations and facts the candidate is grounded in.
-   Treat these as the only source of new information.
+3. NEW INFORMATION SYNTHESIS (markdown) — a synthesis showing how the new facts
+   relate to the document's topic. Use it to understand context and relevance,
+   but do NOT copy its formatting or wording wholesale.
+4. SUPPORTING FACTS — observations and facts created since the last refresh.
+   These are genuinely new — they were NOT available when the current document
+   was written.
 
 Your task: output a JSON object ``{"operations": [...]}``. Applied to CURRENT
-DOCUMENT, the operations must produce the smallest possible change that
-reflects the new facts.
+DOCUMENT, the operations must produce a document that best answers the TOPIC
+by integrating the new facts.
 
-ABSOLUTE RULES
-- If CURRENT DOCUMENT already covers all the supporting facts, output
-  exactly ``{"operations": []}``. An empty operation list IS the correct
-  answer when nothing new has come in. This is the most common case.
+RULES
+- These facts are NEW since the last refresh. The existing document already
+  captures all prior information from earlier refreshes. Your job is to
+  integrate the new facts into the existing document.
+- **Preserve existing content**: The current document was built from prior facts
+  that you cannot see. Do NOT remove or replace existing sections just because
+  the new facts do not reference them. Only remove content when the new facts
+  explicitly contradict or supersede it.
+- **Merge overlapping topics**: When new facts cover topics that overlap with
+  existing sections, merge the new information INTO the existing section
+  rather than creating duplicates. When new facts provide more specific or
+  authoritative guidance on a topic already covered generically, update the
+  existing content to reflect the more specific guidance.
+- **Preserve examples**: Concrete examples, before/after pairs, sample sentences,
+  and illustrative ✅/❌ comparisons are MORE valuable than abstract rules.
+  When facts contain examples, include them. Never drop an example to make
+  room for an abstract restatement of the same point.
 - Operations target sections by ``section_id`` (use the ``id`` field of the
   section in CURRENT DOCUMENT, NOT the heading). Block operations target
   blocks by ``index`` (0-based, against the section's current block list).
-- Add new content with ``append_block``, ``insert_block``, or ``add_section``.
-  Prefer extending an existing section over creating a new one.
-- Modify existing content with ``replace_block`` or ``replace_section_blocks``
-  ONLY when the supporting facts contradict the current text. Do NOT rewrite
-  for style, brevity, or "improvement".
-- Remove stale content with ``remove_block`` or ``remove_section`` ONLY when
-  the supporting facts directly contradict it.
+- **Add** new content with ``append_block``, ``insert_block``, or ``add_section``
+  when facts introduce information not yet covered. Prefer extending an
+  existing section over creating a new one.
+- **Update** existing content with ``replace_block`` or ``replace_section_blocks``
+  when new facts provide corrections, updates, or more specific information
+  about topics already in the document.
+- **Remove** content with ``remove_block`` or ``remove_section`` ONLY when
+  the new facts explicitly contradict or supersede it.
 - NEVER emit operations whose only effect is to reword unchanged content.
 - NEVER emit operations to "normalize" formatting (numbered → bulleted, casing
   changes, paragraph → list, etc).
 - Every operation MUST be justifiable by a specific fact in SUPPORTING FACTS.
+- Output ``{"operations": []}`` only if the new facts are already reflected
+  in the document (e.g., from a concurrent update).
 
 ALLOWED OPERATIONS (each line shows the JSON shape)
 - ``{"op": "append_block", "section_id": "...", "block": {...}}``
@@ -572,7 +606,12 @@ Examples
 - No changes needed → ``{"operations": []}``
 - Add one bullet to an existing "Members" section →
   ``{"operations": [{"op": "append_block", "section_id": "members",
-  "block": {"type": "bullet_list", "items": ["Carol — junior engineer"]}}]}``"""
+  "block": {"type": "bullet_list", "items": ["Carol — junior engineer"]}}]}``
+- Replace a paragraph that has been corrected by new facts →
+  ``{"operations": [{"op": "replace_block", "section_id": "overview",
+  "index": 0, "block": {"type": "paragraph", "text": "Updated summary."}}]}``
+- Remove an obsolete block →
+  ``{"operations": [{"op": "remove_block", "section_id": "status", "index": 2}]}``"""
 
 
 def build_structured_delta_prompt(
@@ -616,15 +655,14 @@ def build_structured_delta_prompt(
         f"## Topic\n{source_query}\n\n"
         f"## CURRENT DOCUMENT (apply ops to this; reference section ids as listed)\n"
         f"```json\n{current_document_json}\n```\n\n"
-        f"## CANDIDATE SUMMARY (hint only — do NOT copy wording wholesale)\n"
+        f"## NEW INFORMATION SYNTHESIS (context for how new facts relate to the topic)\n"
         f"```markdown\n{candidate_markdown}\n```\n\n"
-        f"## SUPPORTING FACTS (the only source of new information)\n{facts_block}"
+        f"## SUPPORTING FACTS (new since last refresh — integrate these)\n{facts_block}"
         f"{budget_hint}\n\n"
         "## Task\n"
-        "Output a JSON object matching the operations schema. Use an empty list "
-        "if no new fact requires a change. Otherwise, emit the smallest set of "
-        "operations that reflects the new facts in CURRENT DOCUMENT, preserving "
-        "all unchanged sections and blocks by simply not mentioning them."
+        "Output a JSON object matching the operations schema. Integrate the new "
+        "supporting facts into CURRENT DOCUMENT. Add, update, or remove content "
+        "as needed. Preserve unchanged sections and blocks by not mentioning them."
     )
 
 

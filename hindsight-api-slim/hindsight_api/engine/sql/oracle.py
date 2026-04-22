@@ -236,6 +236,7 @@ class OracleDialect(SQLDialect):
         fetch_limit: int,
         tags_clause: str = "",
         groups_clause: str = "",
+        extra_where: str = "",
     ) -> str:
         # Oracle 23ai: VECTOR_DISTANCE for cosine, FETCH FIRST for limiting.
         # Wrapped in a derived table to work within UNION ALL.
@@ -251,6 +252,7 @@ class OracleDialect(SQLDialect):
             f"   AND (1 - VECTOR_DISTANCE(embedding, {embedding_param}, COSINE)) >= 0.3"
             f"   {tags_clause}"
             f"   {groups_clause}"
+            f"   {extra_where}"
             f" ORDER BY VECTOR_DISTANCE(embedding, {embedding_param}, COSINE)"
             f" FETCH FIRST {fetch_limit} ROWS ONLY) t"
         )
@@ -268,6 +270,7 @@ class OracleDialect(SQLDialect):
         groups_clause: str = "",
         arm_index: int = 0,
         text_search_extension: str = "native",
+        extra_where: str = "",
     ) -> str:
         # Oracle Text: CONTAINS() / SCORE() with the CTXSYS.CONTEXT index.
         # Each arm gets a unique SCORE label (10 + arm_index) to avoid
@@ -284,6 +287,7 @@ class OracleDialect(SQLDialect):
             f"   AND CONTAINS(text, {text_param}, {label}) > 0"
             f"   {tags_clause}"
             f"   {groups_clause}"
+            f"   {extra_where}"
             f" ORDER BY SCORE({label}) DESC"
             f" FETCH FIRST {limit_param} ROWS ONLY) t{arm_index}"
         )

@@ -17,7 +17,12 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 import tiktoken
 
 from .models import DirectiveInfo, LLMCall, ReflectAgentResult, TokenUsageSummary, ToolCall
-from .prompts import FINAL_SYSTEM_PROMPT, _extract_directive_rules, build_final_prompt, build_system_prompt_for_tools
+from .prompts import (
+    _extract_directive_rules,
+    build_final_prompt,
+    build_final_system_prompt,
+    build_system_prompt_for_tools,
+)
 from .tools_schema import get_reflect_tools
 
 
@@ -186,7 +191,7 @@ async def _generate_structured_output(
         DynamicModel = create_model("StructuredResponse", **fields)
 
         # Include the full schema in the prompt for better LLM guidance
-        schema_str = json.dumps(response_schema, indent=2)
+        schema_str = json.dumps(response_schema, indent=2, ensure_ascii=False)
 
         # Build field descriptions for the prompt
         field_descriptions = []
@@ -446,7 +451,7 @@ async def run_reflect_agent(
             llm_start = time.time()
             response, usage = await llm_config.call(
                 messages=[
-                    {"role": "system", "content": FINAL_SYSTEM_PROMPT},
+                    {"role": "system", "content": build_final_system_prompt(bank_profile.get("mission"))},
                     {"role": "user", "content": prompt},
                 ],
                 scope="reflect",
@@ -503,7 +508,7 @@ async def run_reflect_agent(
             llm_start = time.time()
             response, usage = await llm_config.call(
                 messages=[
-                    {"role": "system", "content": FINAL_SYSTEM_PROMPT},
+                    {"role": "system", "content": build_final_system_prompt(bank_profile.get("mission"))},
                     {"role": "user", "content": prompt},
                 ],
                 scope="reflect",
@@ -606,7 +611,7 @@ async def run_reflect_agent(
             llm_start = time.time()
             response, usage = await llm_config.call(
                 messages=[
-                    {"role": "system", "content": FINAL_SYSTEM_PROMPT},
+                    {"role": "system", "content": build_final_system_prompt(bank_profile.get("mission"))},
                     {"role": "user", "content": prompt},
                 ],
                 scope="reflect",
@@ -649,7 +654,15 @@ async def run_reflect_agent(
 
         # No tool calls - LLM wants to respond with text
         if not result.tool_calls:
-            if result.content:
+            # When directives are present but no evidence has been gathered,
+            # the LLM tends to echo directive content verbatim as its answer.
+            # Fall through to the final-prompt path which doesn't include
+            # directives and handles "no data" gracefully.
+            has_gathered_evidence = (
+                bool(available_memory_ids) or bool(available_mental_model_ids) or bool(available_observation_ids)
+            )
+            directive_leak_risk = directives and not has_gathered_evidence
+            if result.content and not directive_leak_risk:
                 answer = _clean_answer_text(result.content.strip())
 
                 # The call_with_tools call above is intentionally uncapped so the
@@ -719,7 +732,7 @@ async def run_reflect_agent(
             llm_start = time.time()
             response, usage = await llm_config.call(
                 messages=[
-                    {"role": "system", "content": FINAL_SYSTEM_PROMPT},
+                    {"role": "system", "content": build_final_system_prompt(bank_profile.get("mission"))},
                     {"role": "user", "content": prompt},
                 ],
                 scope="reflect",
@@ -783,7 +796,8 @@ async def run_reflect_agent(
                         "content": json.dumps(
                             {
                                 "error": "You must search for information first. Use search_mental_models(), search_observations(), or recall() before providing your final answer."
-                            }
+                            },
+                            ensure_ascii=False,
                         ),
                     }
                 )
@@ -845,7 +859,8 @@ async def run_reflect_agent(
                         "content": json.dumps(
                             {
                                 "error": f"Tool '{_normalize_tool_name(tc.name)}' is not available. Use only the tools provided to you."
-                            }
+                            },
+                            ensure_ascii=False,
                         ),
                     }
                 )
@@ -916,7 +931,7 @@ async def run_reflect_agent(
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "name": tc.name,  # Required by Gemini
-                        "content": json.dumps(output, default=str),
+                        "content": json.dumps(output, default=str, ensure_ascii=False),
                     }
                 )
 
@@ -939,7 +954,7 @@ async def run_reflect_agent(
                 )
 
                 try:
-                    output_chars = len(json.dumps(output))
+                    output_chars = len(json.dumps(output, ensure_ascii=False))
                 except (TypeError, ValueError):
                     output_chars = len(str(output))
 
@@ -976,7 +991,7 @@ def _tool_call_to_dict(tc: "LLMToolCall") -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": tc.name,
-            "arguments": json.dumps(tc.arguments),
+            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
         },
     }
     if tc.thought_signature is not None:
@@ -1074,7 +1089,7 @@ async def _execute_tool_with_timing(
         # Set attributes
         span.set_attribute("hindsight.tool.name", normalized_name)
         span.set_attribute("hindsight.tool.id", tc.id)
-        span.set_attribute("hindsight.tool.arguments", json.dumps(tc.arguments))
+        span.set_attribute("hindsight.tool.arguments", json.dumps(tc.arguments, ensure_ascii=False))
 
         try:
             result = await _execute_tool(

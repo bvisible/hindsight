@@ -13,7 +13,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Optional
+from typing import Any, Optional
 
 from ...config import get_config
 from ..db_utils import acquire_with_retry
@@ -99,6 +99,8 @@ async def retrieve_semantic_bm25_combined(
     tags: list[str] | None = None,
     tags_match: TagsMatch = "any",
     tag_groups: list[TagGroup] | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
 ) -> dict[str, tuple[list[RetrievalResult], list[RetrievalResult]]]:
     """
     Combined semantic + BM25 retrieval for multiple fact types in a single query.
@@ -173,6 +175,21 @@ async def retrieve_semantic_bm25_combined(
     tag_groups_param_start = tags_param_idx + (1 if tags else 0)
     groups_clause, groups_params, _ = build_tag_groups_where_clause(tag_groups, tag_groups_param_start)
 
+    # --- created_at time range filter (appended after tags/groups) ---
+    # Param indices are computed relative to the final params list built below,
+    # so we pre-compute the next available index after all preceding params.
+    _next_idx = tag_groups_param_start + len(groups_params)
+    created_range_clause = ""
+    created_range_params: list[Any] = []
+    if created_after is not None:
+        created_range_params.append(created_after)
+        created_range_clause += f" AND updated_at > ${_next_idx}"
+        _next_idx += 1
+    if created_before is not None:
+        created_range_params.append(created_before)
+        created_range_clause += f" AND updated_at < ${_next_idx}"
+        _next_idx += 1
+
     # --- Semantic UNION ALL arms (one per fact_type) ---
     # Each arm has its own ORDER BY ... LIMIT, enabling the partial HNSW indexes
     # per fact_type instead of forcing a full sequential scan.
@@ -186,6 +203,7 @@ async def retrieve_semantic_bm25_combined(
             fetch_limit=hnsw_fetch,
             tags_clause=tags_clause,
             groups_clause=groups_clause,
+            extra_where=created_range_clause,
         )
         for ft in fact_types
     ]
@@ -207,6 +225,7 @@ async def retrieve_semantic_bm25_combined(
                     groups_clause=groups_clause,
                     arm_index=i,
                     text_search_extension=text_ext,
+                    extra_where=created_range_clause,
                 )
             )
 
@@ -219,6 +238,7 @@ async def retrieve_semantic_bm25_combined(
     if tags:
         params.append(tags)
     params.extend(groups_params)
+    params.extend(created_range_params)
 
     rows = await conn.fetch(query, *params)
 
@@ -252,6 +272,8 @@ async def retrieve_temporal_combined(
     tags: list[str] | None = None,
     tags_match: TagsMatch = "any",
     tag_groups: list[TagGroup] | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
 ) -> dict[str, list[RetrievalResult]]:
     """
     Temporal retrieval for multiple fact types in a single query.
@@ -285,10 +307,25 @@ async def retrieve_temporal_combined(
     tags_clause = build_tags_where_clause_simple(tags, 7, match=tags_match)
     tag_groups_param_start = 7 + (1 if tags else 0)
     groups_clause, groups_params, _ = build_tag_groups_where_clause(tag_groups, tag_groups_param_start)
+
+    # created_at time range filter (after tags/groups)
+    _next_idx = tag_groups_param_start + len(groups_params)
+    created_range_clause = ""
+    created_range_params: list[Any] = []
+    if created_after is not None:
+        created_range_params.append(created_after)
+        created_range_clause += f" AND updated_at > ${_next_idx}"
+        _next_idx += 1
+    if created_before is not None:
+        created_range_params.append(created_before)
+        created_range_clause += f" AND updated_at < ${_next_idx}"
+        _next_idx += 1
+
     params: list = [query_emb_str, bank_id, fact_types, start_date, end_date, semantic_threshold]
     if tags:
         params.append(tags)
     params.extend(groups_params)
+    params.extend(created_range_params)
 
     # Two-phase entry point query:
     # Phase 1 (date_ranked): rank by date only — no embedding computation — for all units in
@@ -320,6 +357,7 @@ async def retrieve_temporal_combined(
               )
               {tags_clause}
               {groups_clause}
+              {created_range_clause}
         ),
         sim_ranked AS (
             SELECT mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start, mu.occurred_end, mu.mentioned_at, mu.fact_type, mu.proof_count, mu.document_id, mu.chunk_id, mu.tags, mu.metadata,
@@ -522,6 +560,8 @@ async def retrieve_all_fact_types_parallel(
     tags: list[str] | None = None,
     tags_match: TagsMatch = "any",
     tag_groups: list[TagGroup] | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
 ) -> MultiFactTypeRetrievalResult:
     """
     Optimized retrieval for multiple fact types using batched queries.
@@ -580,6 +620,8 @@ async def retrieve_all_fact_types_parallel(
             tags=tags,
             tags_match=tags_match,
             tag_groups=tag_groups,
+            created_after=created_after,
+            created_before=created_before,
         )
         semantic_bm25_time = time.time() - semantic_bm25_start
 
@@ -599,6 +641,8 @@ async def retrieve_all_fact_types_parallel(
                 tags=tags,
                 tags_match=tags_match,
                 tag_groups=tag_groups,
+                created_after=created_after,
+                created_before=created_before,
             )
             temporal_time = time.time() - temporal_start
 
@@ -622,6 +666,8 @@ async def retrieve_all_fact_types_parallel(
             tags=tags,
             tags_match=tags_match,
             tag_groups=tag_groups,
+            created_after=created_after,
+            created_before=created_before,
         )
         return ft, results, time.time() - graph_start, graph_timing
 
