@@ -735,14 +735,23 @@ def cleanup() -> None:
 # =============================================================================
 
 
+def _is_streaming_response(response) -> bool:
+    """Check if the response is a streaming wrapper rather than a complete ModelResponse."""
+    return not hasattr(response, "choices")
+
+
 def _format_conversation_for_storage(
     messages: List[dict],
     response,
 ) -> str:
     """Format conversation messages and response for storage to Hindsight.
 
-    Returns the formatted conversation text.
+    Returns the formatted conversation text, or empty string for streaming responses.
     """
+    # Streaming responses (CustomStreamWrapper) don't have .choices — skip storage
+    if _is_streaming_response(response):
+        return ""
+
     items = []
 
     for msg in messages:

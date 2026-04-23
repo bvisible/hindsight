@@ -657,6 +657,107 @@ class TestSetDefaults:
         assert get_defaults() is None
 
 
+class TestStreamingResponseHandling:
+    """Tests for streaming response handling in monkeypatch wrappers and callbacks.
+
+    Regression tests for https://github.com/vectorize-io/hindsight/issues/1221
+    CustomStreamWrapper objects don't have .choices and crash _format_conversation_for_storage.
+    """
+
+    def setup_method(self):
+        """Reset state before each test."""
+        cleanup()
+
+    def teardown_method(self):
+        """Clean up after each test."""
+        cleanup()
+
+    def test_format_conversation_for_storage_crashes_on_stream_wrapper(self):
+        """Test that _format_conversation_for_storage crashes when given a stream object.
+
+        This reproduces the exact bug from issue #1221.
+        """
+        from hindsight_litellm import _format_conversation_for_storage
+
+        # Simulate a CustomStreamWrapper - an object without .choices
+        class FakeStreamWrapper:
+            """Mimics litellm.utils.CustomStreamWrapper which lacks .choices."""
+            pass
+
+        messages = [{"role": "user", "content": "Hello"}]
+        stream_response = FakeStreamWrapper()
+
+        # This should NOT crash - but currently does with AttributeError
+        result = _format_conversation_for_storage(messages, stream_response)
+        # Should gracefully return empty string for non-ModelResponse objects
+        assert isinstance(result, str)
+
+    def test_store_conversation_skips_stream_response(self):
+        """Test that _store_conversation handles streaming responses gracefully."""
+        from unittest.mock import patch
+        from hindsight_litellm import _store_conversation
+
+        configure(hindsight_api_url="http://localhost:8888")
+        set_defaults(bank_id="test-agent")
+
+        class FakeStreamWrapper:
+            pass
+
+        messages = [{"role": "user", "content": "Hello"}]
+        stream_response = FakeStreamWrapper()
+
+        # Should not raise, should skip storage
+        _store_conversation(messages, stream_response, "gpt-4o-mini")
+
+    def test_wrapped_completion_with_stream_true(self):
+        """Test that _wrapped_completion handles stream=True without crashing."""
+        from unittest.mock import patch, MagicMock
+
+        configure(hindsight_api_url="http://localhost:8888", store_conversations=True)
+        set_defaults(bank_id="test-agent")
+        enable()
+
+        class FakeStreamWrapper:
+            pass
+
+        fake_stream = FakeStreamWrapper()
+
+        with patch("litellm.completion", return_value=fake_stream):
+            import hindsight_litellm
+            # Call with stream=True - should not crash on storage
+            response = hindsight_litellm.completion(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": "Hello"}],
+                stream=True,
+            )
+            assert response is fake_stream
+
+    def test_callback_log_success_with_stream_response(self):
+        """Test that HindsightCallback.log_success_event handles stream responses."""
+        from hindsight_litellm.callbacks import HindsightCallback
+
+        configure(hindsight_api_url="http://localhost:8888", store_conversations=True)
+        set_defaults(bank_id="test-agent")
+
+        callback = HindsightCallback()
+
+        class FakeStreamWrapper:
+            pass
+
+        kwargs = {
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+
+        # Should not raise AttributeError
+        callback.log_success_event(
+            kwargs=kwargs,
+            response_obj=FakeStreamWrapper(),
+            start_time=0.0,
+            end_time=1.0,
+        )
+
+
 class TestStreamingSupport:
     """Tests for streaming support in wrappers."""
 
