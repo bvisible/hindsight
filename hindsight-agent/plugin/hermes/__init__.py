@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -65,11 +66,16 @@ def _load_all_agents() -> dict:
 class HindsightAgentProvider(MemoryProvider):
     """Retain-only memory provider that delegates to hindsight-agent config."""
 
+    SYNC_EVERY_N_TURNS = 5  # retain every N turn pairs
+    SYNC_EVERY_SECONDS = 120  # retain at least every 2 minutes
+
     def __init__(self) -> None:
         self._agent_id: str | None = None
         self._config: dict | None = None
         self._session_id: str = ""
         self._session_turns: list[dict] = []
+        self._turn_count: int = 0
+        self._last_sync_time: float = 0.0
         self._sync_thread: threading.Thread | None = None
 
     @property
@@ -88,6 +94,8 @@ class HindsightAgentProvider(MemoryProvider):
 
         self._session_id = session_id
         self._session_turns = []
+        self._turn_count = 0
+        self._last_sync_time = time.monotonic()
 
         # Resolve agent ID from Hermes context
         agent_identity = kwargs.get("agent_identity", "")
@@ -148,12 +156,24 @@ class HindsightAgentProvider(MemoryProvider):
 
         self._session_turns.append({"role": "user", "content": user_content})
         self._session_turns.append({"role": "assistant", "content": assistant_content})
-        logger.info("[hindsight_agent] sync_turn: buffered %d messages", len(self._session_turns))
+        self._turn_count += 1
+        elapsed = time.monotonic() - self._last_sync_time
+        logger.info("[hindsight_agent] sync_turn: buffered %d messages (turn %d, %.0fs since last sync)",
+                    len(self._session_turns), self._turn_count, elapsed)
+
+        # Periodically retain during long sessions — by turns or by time
+        if (self._turn_count % self.SYNC_EVERY_N_TURNS == 0) or (elapsed >= self.SYNC_EVERY_SECONDS):
+            logger.info("[hindsight_agent] periodic retain at turn %d (%.0fs elapsed)", self._turn_count, elapsed)
+            self._do_retain()
 
     def on_session_end(self, messages: list | None = None, **kwargs: Any) -> None:
-        """Retain the full session to Hindsight (async HTTP POST)."""
+        """Retain the full session to Hindsight."""
         logger.info("[hindsight_agent] on_session_end: %d buffered turns, config=%s",
                      len(self._session_turns), bool(self._config))
+        self._do_retain()
+
+    def _do_retain(self) -> None:
+        """Retain buffered turns to Hindsight (async HTTP POST in background thread)."""
         if not self._config or not self._session_turns:
             return
 
@@ -174,6 +194,7 @@ class HindsightAgentProvider(MemoryProvider):
             headers["Authorization"] = f"Bearer {api_token}"
 
         turn_count = len(self._session_turns)
+        self._last_sync_time = time.monotonic()
 
         def _retain() -> None:
             try:
@@ -185,20 +206,19 @@ class HindsightAgentProvider(MemoryProvider):
                 )
                 if resp.is_success:
                     logger.info(
-                        "[hindsight-agent] retained %d messages for %s",
+                        "[hindsight_agent] retained %d messages for %s",
                         turn_count,
                         self._agent_id,
                     )
                 else:
                     logger.warning(
-                        "[hindsight-agent] retain failed (%d): %s",
+                        "[hindsight_agent] retain failed (%d): %s",
                         resp.status_code,
                         resp.text[:200],
                     )
             except Exception as e:
-                logger.warning("[hindsight-agent] retain error: %s", e)
+                logger.warning("[hindsight_agent] retain error: %s", e)
 
-        # Run in background thread to not block session teardown
         if self._sync_thread and self._sync_thread.is_alive():
             self._sync_thread.join(timeout=5.0)
         self._sync_thread = threading.Thread(target=_retain, daemon=True, name="hindsight-agent-retain")
