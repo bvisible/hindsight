@@ -2254,6 +2254,60 @@ jobs:
       working-directory: ./hindsight-embed
       run: uv run pytest tests/ -v
 
+    # Real-world install test for issue #1240: drop both packages into a
+    # --target directory (the layout you get from `uv pip install hindsight-all`
+    # or NixOS) and verify the sibling binary is discovered. We don't start
+    # the daemon here — that path still uses POSIX-only subprocess options —
+    # but this catches any regression in the sibling-binary detection logic
+    # plus surfaces Windows-specific install failures in the deps themselves.
+    - name: Install hindsight-embed and hindsight-api into --target directory
+      shell: bash
+      run: |
+        set -euo pipefail
+        rm -rf install-test
+        mkdir install-test
+        uv pip install --target install-test ./hindsight-embed ./hindsight-api-slim
+
+    - name: Verify sibling hindsight-api.exe is present
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -f install-test/Scripts/hindsight-api.exe ]; then
+          echo "Found install-test/Scripts/hindsight-api.exe"
+        elif [ -f install-test/bin/hindsight-api.exe ]; then
+          echo "Found install-test/bin/hindsight-api.exe"
+        else
+          echo "::error::hindsight-api.exe not found in install target"
+          ls install-test/
+          exit 1
+        fi
+
+    - name: Verify _find_api_command resolves the sibling binary (not uvx)
+      shell: bash
+      run: |
+        set -euo pipefail
+        PYTHONPATH=install-test python -c "
+        from hindsight_embed.daemon_embed_manager import DaemonEmbedManager
+        cmd = DaemonEmbedManager()._find_api_command()
+        print('Resolved command:', cmd)
+        assert len(cmd) == 1 and cmd[0].endswith('hindsight-api.exe'), (
+            f'Expected sibling hindsight-api.exe, got {cmd!r}. '
+            'Falling back to uvx on --target installs reintroduces issue #1240.'
+        )
+        "
+
+    - name: Smoke-check installed hindsight-embed binary runs
+      shell: bash
+      env:
+        PYTHONPATH: install-test
+      run: |
+        set -euo pipefail
+        if [ -f install-test/Scripts/hindsight-embed.exe ]; then
+          install-test/Scripts/hindsight-embed.exe --help
+        else
+          install-test/bin/hindsight-embed.exe --help
+        fi
+
   test-hindsight-all:
     needs: [detect-changes]
     if: >-
