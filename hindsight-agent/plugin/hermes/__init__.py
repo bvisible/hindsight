@@ -149,7 +149,12 @@ class HindsightAgentProvider(MemoryProvider):
         pass
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Buffer turns for end-of-session retain."""
+        """Accumulate turns and retain the full session on every turn.
+
+        The gateway may create a new provider instance per session without
+        calling on_session_end, so we retain the full accumulated session
+        on every turn (with document_id for upsert) to avoid data loss.
+        """
         if not self._config:
             logger.debug("[hindsight_agent] sync_turn: skipped (no config)")
             return
@@ -157,14 +162,9 @@ class HindsightAgentProvider(MemoryProvider):
         self._session_turns.append({"role": "user", "content": user_content})
         self._session_turns.append({"role": "assistant", "content": assistant_content})
         self._turn_count += 1
-        elapsed = time.monotonic() - self._last_sync_time
-        logger.info("[hindsight_agent] sync_turn: buffered %d messages (turn %d, %.0fs since last sync)",
-                    len(self._session_turns), self._turn_count, elapsed)
-
-        # Periodically retain during long sessions — by turns or by time
-        if (self._turn_count % self.SYNC_EVERY_N_TURNS == 0) or (elapsed >= self.SYNC_EVERY_SECONDS):
-            logger.info("[hindsight_agent] periodic retain at turn %d (%.0fs elapsed)", self._turn_count, elapsed)
-            self._do_retain()
+        logger.info("[hindsight_agent] sync_turn: %d messages (turn %d), retaining",
+                    len(self._session_turns), self._turn_count)
+        self._do_retain()
 
     def on_session_end(self, messages: list | None = None, **kwargs: Any) -> None:
         """Retain the full session to Hindsight."""
