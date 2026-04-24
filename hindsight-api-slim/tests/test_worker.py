@@ -1707,9 +1707,11 @@ class TestDynamicTenantDiscovery:
         )
 
         claimed = await poller.claim_batch()
-        assert len(claimed) == 3
+        # Filter to our bank — parallel tests may contribute other claims.
+        my_claims = [c for c in claimed if c.task_dict.get("bank_id") == bank_id]
+        assert len(my_claims) == 3, f"Expected 3 claims for our bank, got {len(my_claims)}"
 
-        # All tasks should have schema=None (public)
+        # All tasks (ours or not) should have schema=None since no tenant extension is set.
         for task in claimed:
             assert task.schema is None
 
