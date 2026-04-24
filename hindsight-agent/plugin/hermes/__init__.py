@@ -24,26 +24,39 @@ from agent.memory_provider import MemoryProvider
 
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = Path.home() / ".hindsight-agent" / "config.json"
+# Resolve the REAL home directory at import time, before Hermes
+# overrides $HOME for profile isolation. This ensures the plugin
+# always finds the global config regardless of $HOME changes.
+_REAL_HOME = Path.home()
+CONFIG_PATH = _REAL_HOME / ".hindsight-agent" / "config.json"
+
+
+def _find_config() -> Path | None:
+    """Find config.json using the real home directory."""
+    if CONFIG_PATH.exists():
+        return CONFIG_PATH
+    return None
 
 
 def _load_agent_config(agent_id: str) -> dict | None:
-    """Load config for a specific agent from ~/.hindsight-agent/config.json."""
-    if not CONFIG_PATH.exists():
+    """Load config for a specific agent."""
+    path = _find_config()
+    if not path:
         return None
     try:
-        data = json.loads(CONFIG_PATH.read_text())
+        data = json.loads(path.read_text())
         return data.get("agents", {}).get(agent_id)
     except Exception:
         return None
 
 
 def _load_all_agents() -> dict:
-    """Load all agents from ~/.hindsight-agent/config.json."""
-    if not CONFIG_PATH.exists():
+    """Load all agents."""
+    path = _find_config()
+    if not path:
         return {}
     try:
-        data = json.loads(CONFIG_PATH.read_text())
+        data = json.loads(path.read_text())
         return data.get("agents", {})
     except Exception:
         return {}
@@ -71,10 +84,9 @@ class HindsightAgentProvider(MemoryProvider):
         self._session_turns = []
 
         # Resolve agent ID from Hermes context
-        # Try agent_identity first, then fall back to checking all configured agents
         agent_identity = kwargs.get("agent_identity", "")
-        logger.info("[hindsight_agent] initialize: session=%s agent_identity=%s kwargs=%s",
-                    session_id, agent_identity, list(kwargs.keys()))
+        logger.info("[hindsight_agent] initialize: session=%s agent_identity=%s config=%s",
+                    session_id, agent_identity, CONFIG_PATH)
 
         self._config = None
         self._agent_id = None
@@ -86,8 +98,6 @@ class HindsightAgentProvider(MemoryProvider):
                 self._agent_id = agent_identity
 
         # Fallback: if only one hermes agent in config, use it
-        # (covers the common single-profile case where agent_identity is "default"
-        # but setup used a custom agent ID)
         if not self._config:
             agents = _load_all_agents()
             hermes_agents = {aid: cfg for aid, cfg in agents.items() if cfg.get("harness") == "hermes"}

@@ -344,10 +344,11 @@ def _setup_hermes(agent_id: str, workspace: Path) -> None:
 
     click.echo(f"  Retain plugin installed to {plugin_dest}")
 
-    # Set memory provider (profile-scoped if not default)
-    config_cmd = ["hermes", "config", "set", "memory.provider", "hindsight_agent"]
+    # Set memory provider (--profile flag must come before subcommand)
     if agent_id != "default":
         config_cmd = ["hermes", "--profile", agent_id, "config", "set", "memory.provider", "hindsight_agent"]
+    else:
+        config_cmd = ["hermes", "config", "set", "memory.provider", "hindsight_agent"]
     result = subprocess.run(config_cmd, capture_output=True, text=True)
     if result.returncode == 0:
         click.echo("  Memory provider set to hindsight_agent")
