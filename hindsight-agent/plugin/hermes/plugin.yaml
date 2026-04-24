@@ -1,0 +1,8 @@
+name: hindsight-agent
+version: 0.1.0
+description: "Lightweight Hindsight retain plugin for hindsight-agent. Reads bank/URL from ~/.hindsight-agent/config.json."
+pip_dependencies:
+  - "httpx>=0.27"
+requires_env: []
+hooks:
+  - on_session_end

@@ -172,6 +172,21 @@ The setup command registers a lightweight retain plugin in OpenClaw. On every `a
 
 If an agent isn't in the config, the plugin silently skips it — so it doesn't interfere with other agents.
 
+## Hermes Plugin
+
+For Hermes agents, setup installs a memory provider plugin at `~/.hermes/plugins/hindsight-agent/`. It implements the `MemoryProvider` ABC:
+
+- **`sync_turn`**: Buffers user/assistant turns during the session
+- **`on_session_end`**: Retains the full session to Hindsight (async HTTP POST)
+- **No tools, no prefetch**: The agent-knowledge skill handles reads via the CLI
+
+After setup, activate with:
+```bash
+hermes config set memory.provider hindsight-agent
+```
+
+The plugin reads `~/.hindsight-agent/config.json` for bank/URL/token resolution — same config as the CLI and the OpenClaw plugin.
+
 ## Bank Templates
 
 Templates pre-configure a bank with missions, mental models, and directives:

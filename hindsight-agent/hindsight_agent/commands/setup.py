@@ -38,7 +38,7 @@ OPENCLAW_PLUGIN_DIR = Path(__file__).resolve().parent.parent.parent / "plugin" /
 )
 @click.option(
     "--harness",
-    type=click.Choice(["openclaw"]),
+    type=click.Choice(["openclaw", "hermes"]),
     required=True,
     help="Agent harness to configure",
 )
@@ -102,13 +102,17 @@ def setup(
 
     # 4. Install skill into workspace
     click.echo("Installing agent-knowledge skill...")
-    _install_skill(agent_id, workspace_path)
+    _install_skill(agent_id, workspace_path, harness)
     click.echo("  Done.")
 
     # 5. Harness-specific setup
     if harness == "openclaw":
         click.echo("Configuring OpenClaw...")
         _setup_openclaw(agent_id, workspace_path, model)
+        click.echo("  Done.")
+    elif harness == "hermes":
+        click.echo("Configuring Hermes...")
+        _setup_hermes(agent_id, workspace_path)
         click.echo("  Done.")
 
     click.echo()
@@ -145,17 +149,22 @@ def _ingest_content(api: HindsightAPI, bank_id: str, content_dir: Path) -> None:
     click.echo("  Content ingestion queued (async). Run consolidation after completion.")
 
 
+HERMES_PLUGIN_DIR = Path(__file__).resolve().parent.parent.parent / "plugin" / "hermes"
+
+
 def _resolve_workspace(agent_id: str, harness: str, workspace: str | None) -> Path:
     if workspace:
         return Path(workspace).expanduser().resolve()
     if harness == "openclaw":
         return Path.home() / ".hindsight-agents" / "openclaw" / agent_id
+    if harness == "hermes":
+        # Hermes skills live in ~/.hermes/skills/
+        return Path.home() / ".hermes"
     return Path.home() / ".hindsight-agents" / agent_id
 
 
-def _install_skill(agent_id: str, workspace: Path) -> None:
-    """Copy the skill template into the workspace with agent_id baked in,
-    and patch AGENTS.md to always load the skill at session startup."""
+def _install_skill(agent_id: str, workspace: Path, harness: str) -> None:
+    """Copy the skill template into the workspace with agent_id baked in."""
     skill_dir = workspace / "skills" / "agent-knowledge"
     skill_dir.mkdir(parents=True, exist_ok=True)
 
@@ -167,18 +176,18 @@ def _install_skill(agent_id: str, workspace: Path) -> None:
     content = content.replace("{{AGENT_ID}}", agent_id)
     (skill_dir / "SKILL.md").write_text(content)
 
-    # Patch AGENTS.md to load the skill at session startup
-    agents_md = workspace / "AGENTS.md"
-    if agents_md.exists():
-        text = agents_md.read_text()
-        marker = "## Session Startup"
-        skill_line = "5. Read `skills/agent-knowledge/SKILL.md` and **execute its mandatory startup sequence** (run the commands, don't just read them)"
-        if "agent-knowledge/SKILL.md" not in text and marker in text:
-            text = text.replace(
-                "Don't ask permission. Just do it.",
-                f"{skill_line}\n\nDon't ask permission. Just do it.",
-            )
-            agents_md.write_text(text)
+    # Harness-specific: patch startup to auto-load the skill
+    if harness == "openclaw":
+        agents_md = workspace / "AGENTS.md"
+        if agents_md.exists():
+            text = agents_md.read_text()
+            skill_line = "5. Read `skills/agent-knowledge/SKILL.md` and **execute its mandatory startup sequence** (run the commands, don't just read them)"
+            if "agent-knowledge/SKILL.md" not in text and "## Session Startup" in text:
+                text = text.replace(
+                    "Don't ask permission. Just do it.",
+                    f"{skill_line}\n\nDon't ask permission. Just do it.",
+                )
+                agents_md.write_text(text)
 
 
 def _setup_openclaw(agent_id: str, workspace: Path, model: str | None) -> None:
@@ -278,3 +287,31 @@ def _manually_configure_openclaw_plugin(openclaw_config: Path) -> None:
     }
     openclaw_config.write_text(json.dumps(config, indent=2) + "\n")
     click.echo("  Retain plugin configured in openclaw.json.")
+
+
+def _setup_hermes(agent_id: str, workspace: Path) -> None:
+    """Install the hindsight-agent memory plugin into Hermes."""
+    hermes_home = Path.home() / ".hermes"
+    plugin_dest = hermes_home / "plugins" / "hindsight-agent"
+
+    if not HERMES_PLUGIN_DIR.exists():
+        raise click.ClickException(
+            f"Hermes plugin not found at {HERMES_PLUGIN_DIR}. "
+            "Make sure you're running from the hindsight-agent repo."
+        )
+
+    # Copy plugin files
+    plugin_dest.mkdir(parents=True, exist_ok=True)
+    for src_file in HERMES_PLUGIN_DIR.iterdir():
+        if src_file.is_file():
+            shutil.copy2(src_file, plugin_dest / src_file.name)
+    click.echo(f"  Retain plugin installed to {plugin_dest}")
+
+    # Configure Hermes to use hindsight-agent as memory provider
+    config_path = hermes_home / "config.yaml"
+    if config_path.exists():
+        config_text = config_path.read_text()
+        if "hindsight-agent" not in config_text:
+            click.echo("  Note: Set memory provider with: hermes config set memory.provider hindsight-agent")
+    else:
+        click.echo("  Note: Set memory provider with: hermes config set memory.provider hindsight-agent")
