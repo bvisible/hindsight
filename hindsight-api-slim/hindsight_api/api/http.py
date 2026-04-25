@@ -2621,16 +2621,15 @@ def create_app(
                 logging.info("DB pool metrics configured")
 
         # Start worker poller if the backend supports it.
-        # Backends that don't support async worker/poller (e.g. Oracle) use
-        # SyncTaskBackend instead, executing tasks inline.
-        if config.worker_enabled and memory._pool is not None and memory._backend.supports_worker_poller:
+        # All current backends (PostgreSQL, Oracle) support async worker/poller.
+        if config.worker_enabled and memory._backend.supports_worker_poller:
             from ..config import DEFAULT_DATABASE_SCHEMA
 
             worker_id = config.worker_id or socket.gethostname()
             # Convert default schema to None for SQL compatibility (no schema prefix)
             schema = None if config.database_schema == DEFAULT_DATABASE_SCHEMA else config.database_schema
             poller = WorkerPoller(
-                pool=memory._pool,
+                backend=memory._backend,
                 worker_id=worker_id,
                 executor=memory.execute_task,
                 poll_interval_ms=config.worker_poll_interval_ms,

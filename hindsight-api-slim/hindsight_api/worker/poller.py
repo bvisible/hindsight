@@ -1,8 +1,11 @@
 """
 Worker poller for distributed task execution.
 
-Polls PostgreSQL for pending tasks and executes them using
+Polls the database for pending tasks and executes them using
 FOR UPDATE SKIP LOCKED for safe concurrent claiming.
+
+Backend-agnostic: works with any DatabaseBackend implementation
+(PostgreSQL via asyncpg, Oracle via oracledb, etc.).
 """
 
 import asyncio
@@ -19,8 +22,7 @@ from .exceptions import DeferOperation, RetryTaskAt
 from .stage import StageHolder, bind_holder
 
 if TYPE_CHECKING:
-    import asyncpg
-
+    from hindsight_api.engine.db.base import DatabaseBackend
     from hindsight_api.extensions.tenant import TenantExtension
 
 logger = logging.getLogger(__name__)
@@ -87,17 +89,18 @@ class SlotAvailability:
 
 class WorkerPoller:
     """
-    Polls PostgreSQL for pending tasks and executes them.
+    Polls the database for pending tasks and executes them.
 
     Uses FOR UPDATE SKIP LOCKED for safe distributed claiming,
     allowing multiple workers to process tasks without conflicts.
 
     Supports dynamic multi-tenant discovery via tenant_extension.
+    Backend-agnostic via DatabaseBackend abstraction.
     """
 
     def __init__(
         self,
-        pool: "asyncpg.Pool",
+        backend: "DatabaseBackend",
         worker_id: str,
         executor: Callable[[dict[str, Any]], Awaitable[None]],
         poll_interval_ms: int = 500,
@@ -110,7 +113,7 @@ class WorkerPoller:
         Initialize the worker poller.
 
         Args:
-            pool: asyncpg connection pool
+            backend: Database backend (PostgreSQL, Oracle, etc.)
             worker_id: Unique identifier for this worker
             executor: Async function to execute tasks (typically MemoryEngine.execute_task)
             poll_interval_ms: Interval between polls when no tasks found (milliseconds)
@@ -123,7 +126,7 @@ class WorkerPoller:
                 Remaining slots (max_slots - sum of reservations) form a shared pool usable
                 by any operation type. Defaults to {"consolidation": 2} if None.
         """
-        self._pool = pool
+        self._backend = backend
         self._worker_id = worker_id
         self._executor = executor
         self._poll_interval_ms = poll_interval_ms
@@ -194,7 +197,7 @@ class WorkerPoller:
         In hindsight-cloud deployments this is installed by a Helm hook
         job alongside ``total_pending_tasks()``.
         """
-        async with self._pool.acquire() as conn:
+        async with self._backend.acquire() as conn:
             try:
                 rows = await conn.fetch("SELECT * FROM schemas_with_pending_work()")
                 return {r[0] for r in rows}
@@ -415,7 +418,7 @@ class WorkerPoller:
         """
         table = fq_table("async_operations", schema)
 
-        async with self._pool.acquire() as conn:
+        async with self._backend.acquire() as conn:
             async with conn.transaction():
                 all_rows: list[Any] = []
                 claimed_ids: list[Any] = []
@@ -596,14 +599,15 @@ class WorkerPoller:
     async def _mark_completed(self, operation_id: str, schema: str | None):
         """Mark a task as completed."""
         table = fq_table("async_operations", schema)
-        await self._pool.execute(
-            f"""
-            UPDATE {table}
-            SET status = 'completed', completed_at = now(), updated_at = now()
-            WHERE operation_id = $1
-            """,
-            operation_id,
-        )
+        async with self._backend.acquire() as conn:
+            await conn.execute(
+                f"""
+                UPDATE {table}
+                SET status = 'completed', completed_at = now(), updated_at = now()
+                WHERE operation_id = $1
+                """,
+                operation_id,
+            )
 
     async def _mark_failed(self, operation_id: str, error_message: str, schema: str | None):
         """Mark a task as failed with error message, then propagate to parent if applicable."""
@@ -611,7 +615,7 @@ class WorkerPoller:
         # Truncate error message if too long (max 5000 chars in schema)
         error_message = error_message[:5000] if len(error_message) > 5000 else error_message
 
-        async with self._pool.acquire() as conn:
+        async with self._backend.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(
                     f"""
@@ -711,17 +715,18 @@ class WorkerPoller:
         """Reset task to pending with a future retry timestamp."""
         table = fq_table("async_operations", schema)
         error_message = error_message[:5000] if len(error_message) > 5000 else error_message
-        await self._pool.execute(
-            f"""
-            UPDATE {table}
-            SET status = 'pending', next_retry_at = $2, worker_id = NULL, claimed_at = NULL,
-                retry_count = retry_count + 1, error_message = $3, updated_at = now()
-            WHERE operation_id = $1
-            """,
-            operation_id,
-            retry_at,
-            error_message,
-        )
+        async with self._backend.acquire() as conn:
+            await conn.execute(
+                f"""
+                UPDATE {table}
+                SET status = 'pending', next_retry_at = $2, worker_id = NULL, claimed_at = NULL,
+                    retry_count = retry_count + 1, error_message = $3, updated_at = now()
+                WHERE operation_id = $1
+                """,
+                operation_id,
+                retry_at,
+                error_message,
+            )
         logger.warning(f"Task {operation_id} scheduled for retry at {retry_at}: {error_message}")
 
     async def _defer_operation(self, operation_id: str, exec_date: "Any", reason: str, schema: str | None):
@@ -731,16 +736,17 @@ class WorkerPoller:
         populate `error_message` — defer is intentional backpressure, not a failure.
         """
         table = fq_table("async_operations", schema)
-        await self._pool.execute(
-            f"""
-            UPDATE {table}
-            SET status = 'pending', next_retry_at = $2, worker_id = NULL, claimed_at = NULL,
-                updated_at = now()
-            WHERE operation_id = $1
-            """,
-            operation_id,
-            exec_date,
-        )
+        async with self._backend.acquire() as conn:
+            await conn.execute(
+                f"""
+                UPDATE {table}
+                SET status = 'pending', next_retry_at = $2, worker_id = NULL, claimed_at = NULL,
+                    updated_at = now()
+                WHERE operation_id = $1
+                """,
+                operation_id,
+                exec_date,
+            )
         logger.info(f"Task {operation_id} deferred until {exec_date}: {reason}")
 
     async def execute_task(self, task: ClaimedTask):
@@ -850,14 +856,15 @@ class WorkerPoller:
                 total_count += batch_count
 
                 # Then reset normal worker tasks
-                result = await self._pool.execute(
-                    f"""
-                    UPDATE {table}
-                    SET status = 'pending', worker_id = NULL, claimed_at = NULL, updated_at = now()
-                    WHERE status = 'processing' AND worker_id = $1 AND result_metadata->>'batch_id' IS NULL
-                    """,
-                    self._worker_id,
-                )
+                async with self._backend.acquire() as conn:
+                    result = await conn.execute(
+                        f"""
+                        UPDATE {table}
+                        SET status = 'pending', worker_id = NULL, claimed_at = NULL, updated_at = now()
+                        WHERE status = 'processing' AND worker_id = $1 AND result_metadata->>'batch_id' IS NULL
+                        """,
+                        self._worker_id,
+                    )
 
                 # Parse "UPDATE N" to get count
                 count = int(result.split()[-1]) if result else 0
@@ -887,16 +894,17 @@ class WorkerPoller:
         table = fq_table("async_operations", schema)
 
         try:
-            # Find operations with batch_id in metadata (batch API operations)
-            rows = await self._pool.fetch(
-                f"""
-                SELECT operation_id, task_payload, result_metadata
-                FROM {table}
-                WHERE status = 'processing'
-                  AND result_metadata ? 'batch_id'
-                  AND task_payload IS NOT NULL
-                """
-            )
+            async with self._backend.acquire() as conn:
+                # Find operations with batch_id in metadata (batch API operations)
+                rows = await conn.fetch(
+                    f"""
+                    SELECT operation_id, task_payload, result_metadata
+                    FROM {table}
+                    WHERE status = 'processing'
+                      AND result_metadata ? 'batch_id'
+                      AND task_payload IS NOT NULL
+                    """
+                )
 
             if not rows:
                 return 0
@@ -926,14 +934,15 @@ class WorkerPoller:
 
                 # Mark operation as ready for re-processing
                 # Reset to pending with task_payload intact so worker picks it up again
-                await self._pool.execute(
-                    f"""
-                    UPDATE {table}
-                    SET status = 'pending', worker_id = NULL, claimed_at = NULL, updated_at = now()
-                    WHERE operation_id = $1
-                    """,
-                    operation_id,
-                )
+                async with self._backend.acquire() as conn:
+                    await conn.execute(
+                        f"""
+                        UPDATE {table}
+                        SET status = 'pending', worker_id = NULL, claimed_at = NULL, updated_at = now()
+                        WHERE operation_id = $1
+                        """,
+                        operation_id,
+                    )
 
                 recovered += 1
                 logger.info(f"Batch operation {operation_id} reset to pending for re-processing")
@@ -1111,7 +1120,7 @@ class WorkerPoller:
             # operation_type -> aggregated bucket counts across schemas
             pending_breakdown: dict[str, dict[str, int]] = {}
 
-            async with self._pool.acquire() as conn:
+            async with self._backend.acquire() as conn:
                 for schema in schemas:
                     table = fq_table("async_operations", schema)
 
@@ -1119,16 +1128,17 @@ class WorkerPoller:
                     # filters on, so an operator can see why pending > 0 but
                     # nothing is being claimed (orphaned batch_retain parents,
                     # retry backoff, etc.).
+                    # Use SUM(CASE WHEN ...) instead of COUNT(*) FILTER (WHERE ...)
+                    # for Oracle compatibility — FILTER is PG-specific.
                     breakdown_rows = await conn.fetch(
                         f"""
                         SELECT
                             operation_type,
                             COUNT(*) AS total,
-                            COUNT(*) FILTER (WHERE task_payload IS NULL) AS payload_null,
-                            COUNT(*) FILTER (
-                                WHERE next_retry_at IS NOT NULL AND next_retry_at > now()
-                            ) AS retry_blocked,
-                            COUNT(*) FILTER (WHERE worker_id IS NOT NULL) AS assigned
+                            SUM(CASE WHEN task_payload IS NULL THEN 1 ELSE 0 END) AS payload_null,
+                            SUM(CASE WHEN next_retry_at IS NOT NULL AND next_retry_at > now()
+                                THEN 1 ELSE 0 END) AS retry_blocked,
+                            SUM(CASE WHEN worker_id IS NOT NULL THEN 1 ELSE 0 END) AS assigned
                         FROM {table}
                         WHERE status = 'pending'
                         GROUP BY operation_type
@@ -1218,9 +1228,9 @@ class WorkerPoller:
             return "unavailable"
 
     def _format_pool_stats(self) -> str:
-        """Render asyncpg pool stats. Returns 'unavailable' if pool can't be introspected."""
-        pool = self._pool
+        """Render connection pool stats. Returns 'unavailable' if pool can't be introspected."""
         try:
+            pool = self._backend.get_pool()
             # asyncpg.Pool exposes _holders / _queue internally; fall back gracefully
             # to public methods if the layout ever changes.
             size = pool.get_size() if hasattr(pool, "get_size") else len(getattr(pool, "_holders", []))
@@ -1351,9 +1361,15 @@ class WorkerPoller:
         Catches the case where a coroutine appears 'fine' from Python's perspective
         but is blocked on a Postgres row lock - which is exactly how the 3-phase
         retain pipeline deadlock would present.
+
+        pg_stat_activity is PostgreSQL-specific; skip on other backends.
         """
+        # pg_stat_activity is PG-specific — skip on non-PG backends.
+        if self._backend.backend_type != "postgresql":
+            return
+
         try:
-            async with self._pool.acquire() as conn:
+            async with self._backend.acquire() as conn:
                 rows = await conn.fetch(
                     """
                     SELECT

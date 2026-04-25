@@ -449,17 +449,16 @@ class OracleOps(DataAccessOps):
 
         logger = logging.getLogger(__name__)
 
-        # Oracle: source_memory_ids is stored as JSON CLOB, not a native array.
-        # Use JSON_TABLE to explode the array, and subqueries for overlap checks.
+        # Entity expansion via observation_sources junction table.
+        # Previously used JSON_TABLE to explode source_memory_ids CLOB. The junction
+        # table approach uses standard SQL joins, identical to the PG backend.
+        obs_sources_table = mu_table.replace("memory_units", "observation_sources")
         entity_rows = await conn.fetch(
             f"""
             WITH seed_sources AS (
-                SELECT DISTINCT jt.source_id
-                FROM {mu_table} mu_seed,
-                     JSON_TABLE(mu_seed.source_memory_ids, '$[*]'
-                                COLUMNS (source_id VARCHAR2(36) PATH '$')) jt
-                WHERE mu_seed.id = ANY($1::uuid[])
-                  AND mu_seed.source_memory_ids IS NOT NULL
+                SELECT DISTINCT os.source_id
+                FROM {obs_sources_table} os
+                WHERE os.observation_id = ANY($1::uuid[])
             ),
             source_entities AS (
                 SELECT DISTINCT ue_seed.entity_id
@@ -484,19 +483,18 @@ class OracleOps(DataAccessOps):
                 mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start,
                 mu.occurred_end, mu.mentioned_at,
                 mu.fact_type, mu.document_id, mu.chunk_id, mu.tags, mu.proof_count,
-                (SELECT COUNT(DISTINCT jt2.source_id)
-                 FROM JSON_TABLE(mu.source_memory_ids, '$[*]'
-                                 COLUMNS (source_id VARCHAR2(36) PATH '$')) jt2
-                 WHERE jt2.source_id IN (SELECT source_id FROM connected_sources)
+                (SELECT COUNT(*)
+                 FROM {obs_sources_table} os2
+                 WHERE os2.observation_id = mu.id
+                   AND os2.source_id IN (SELECT source_id FROM connected_sources)
                 ) AS score
             FROM {mu_table} mu
             WHERE mu.fact_type = 'observation'
               AND mu.id != ALL($1::uuid[])
               AND EXISTS (
-                  SELECT 1
-                  FROM JSON_TABLE(mu.source_memory_ids, '$[*]'
-                                  COLUMNS (source_id VARCHAR2(36) PATH '$')) jt3
-                  WHERE jt3.source_id IN (SELECT source_id FROM connected_sources)
+                  SELECT 1 FROM {obs_sources_table} os3
+                  WHERE os3.observation_id = mu.id
+                    AND os3.source_id IN (SELECT source_id FROM connected_sources)
               )
             ORDER BY score DESC
             FETCH FIRST $2 ROWS ONLY
@@ -591,7 +589,10 @@ class OracleOps(DataAccessOps):
     ) -> None:
         # Oracle 23ai supports HNSW vector indexes but does NOT support partial
         # indexes (WHERE clause on CREATE INDEX for vector indexes). Uses a single
-        # global vector index created during migrations instead.
+        # global HNSW index with ORGANIZATION NEIGHBOR PARTITIONS created during
+        # migrations. memory_units is partitioned by LIST (bank_id) AUTOMATIC,
+        # so Oracle creates partitions per bank on INSERT and the optimizer can
+        # prune partitions on bank_id-scoped queries.
         return
 
     async def drop_bank_vector_indexes(

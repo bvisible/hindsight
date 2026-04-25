@@ -428,14 +428,16 @@ class PostgreSQLOps(DataAccessOps):
         per_entity_limit: int,
         causal_weight_threshold: float,
     ) -> tuple[list[ResultRow], list[ResultRow], list[ResultRow]]:
-        # Entity expansion via source_memory_ids (native array ops)
+        # Entity expansion via observation_sources junction table.
+        # Previously used PG-specific unnest(source_memory_ids) and array
+        # overlap (&&). The junction table approach is portable across backends.
+        obs_sources_table = mu_table.replace("memory_units", "observation_sources")
         entity_rows = await conn.fetch(
             f"""
             WITH source_ids AS (
-                SELECT DISTINCT unnest(source_memory_ids) AS source_id
-                FROM {mu_table}
-                WHERE id = ANY($1::uuid[])
-                  AND source_memory_ids IS NOT NULL
+                SELECT DISTINCT os.source_id
+                FROM {obs_sources_table} os
+                WHERE os.observation_id = ANY($1::uuid[])
             ),
             source_entities AS (
                 SELECT DISTINCT ue_seed.entity_id
@@ -459,13 +461,18 @@ class PostgreSQLOps(DataAccessOps):
                 mu.occurred_end, mu.mentioned_at,
                 mu.fact_type, mu.document_id, mu.chunk_id, mu.tags, mu.proof_count,
                 (SELECT COUNT(*)
-                 FROM unnest(mu.source_memory_ids) s
-                 WHERE s = ANY(ARRAY(SELECT source_id FROM connected_sources))
+                 FROM {obs_sources_table} os2
+                 WHERE os2.observation_id = mu.id
+                   AND os2.source_id IN (SELECT source_id FROM connected_sources)
                 )::float AS score
             FROM {mu_table} mu
             WHERE mu.fact_type = 'observation'
               AND mu.id != ALL($1::uuid[])
-              AND mu.source_memory_ids && ARRAY(SELECT source_id FROM connected_sources)::uuid[]
+              AND EXISTS (
+                  SELECT 1 FROM {obs_sources_table} os3
+                  WHERE os3.observation_id = mu.id
+                    AND os3.source_id IN (SELECT source_id FROM connected_sources)
+              )
             ORDER BY score DESC
             LIMIT $2
             """,

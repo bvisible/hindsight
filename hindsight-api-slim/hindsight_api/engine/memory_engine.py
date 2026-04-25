@@ -598,9 +598,7 @@ class MemoryEngine(MemoryEngineInterface):
         self._cross_encoder_reranker = CrossEncoderReranker(cross_encoder=cross_encoder)
 
         # Initialize task backend.
-        # Each backend advertises its task execution strategy via create_task_backend().
-        # PG uses BrokerTaskBackend + WorkerPoller for async background execution.
-        # Oracle uses SyncTaskBackend for inline execution (no async worker support yet).
+        # All backends use BrokerTaskBackend + WorkerPoller for async background execution.
         # Create the backend object early so we can query its capabilities.
         self._backend = create_database_backend(self._database_backend_type)
         if task_backend:
@@ -3301,15 +3299,17 @@ class MemoryEngine(MemoryEngineInterface):
                 obs_chunk_ids: dict[str, list[str]] = {}
                 if observation_ids_ordered:
                     async with acquire_with_retry(backend) as obs_conn:
+                        # Use observation_sources junction table instead of
+                        # PG-specific ANY(obs.source_memory_ids) array join.
                         obs_source_rows = await obs_conn.fetch(
                             f"""
-                            SELECT obs.id AS obs_id, mu.chunk_id
-                            FROM {fq_table("memory_units")} obs
+                            SELECT os.observation_id AS obs_id, mu.chunk_id
+                            FROM {fq_table("observation_sources")} os
                             JOIN {fq_table("memory_units")} mu
-                              ON mu.id = ANY(obs.source_memory_ids)
-                            WHERE obs.id = ANY($1::uuid[])
+                              ON mu.id = os.source_id
+                            WHERE os.observation_id = ANY($1::uuid[])
                               AND mu.chunk_id IS NOT NULL
-                            ORDER BY array_position($1::uuid[], obs.id)
+                            ORDER BY array_position($1::uuid[], os.observation_id)
                             """,
                             observation_ids_ordered,
                         )
@@ -3908,12 +3908,19 @@ class MemoryEngine(MemoryEngineInterface):
 
                         unit_uuids = [uuid_module.UUID(uid) for uid in unit_ids]
                         unit_uuid_set = {str(u) for u in unit_uuids}
+                        # Use observation_sources junction table instead of
+                        # PG-specific array overlap (&&) operator.
                         affected_obs = await conn.fetch(
                             f"""
-                            SELECT id, source_memory_ids FROM {fq_table("memory_units")}
-                            WHERE bank_id = $1
-                              AND fact_type = 'observation'
-                              AND source_memory_ids && $2::uuid[]
+                            SELECT mu.id, mu.source_memory_ids
+                            FROM {fq_table("memory_units")} mu
+                            WHERE mu.bank_id = $1
+                              AND mu.fact_type = 'observation'
+                              AND EXISTS (
+                                  SELECT 1 FROM {fq_table("observation_sources")} os
+                                  WHERE os.observation_id = mu.id
+                                    AND os.source_id = ANY($2::uuid[])
+                              )
                             """,
                             bank_id,
                             unit_uuids,

@@ -192,13 +192,19 @@ async def delete_stale_observations_for_memories(
 
     fact_uuids = [uuid.UUID(str(fid)) if not isinstance(fid, uuid.UUID) else fid for fid in fact_ids]
 
+    # Use observation_sources junction table instead of PG-specific array
+    # overlap operator (&&). This is portable across all backends.
     affected_obs = await conn.fetch(
         f"""
-        SELECT id, source_memory_ids
-        FROM {fq_table("memory_units")}
-        WHERE bank_id = $1
-          AND fact_type = 'observation'
-          AND source_memory_ids && $2::uuid[]
+        SELECT mu.id, mu.source_memory_ids
+        FROM {fq_table("memory_units")} mu
+        WHERE mu.bank_id = $1
+          AND mu.fact_type = 'observation'
+          AND EXISTS (
+              SELECT 1 FROM {fq_table("observation_sources")} os
+              WHERE os.observation_id = mu.id
+                AND os.source_id = ANY($2::uuid[])
+          )
         """,
         bank_id,
         fact_uuids,

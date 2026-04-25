@@ -249,7 +249,7 @@ class TestWorkerPoller:
             executed_tasks.append(task_dict)
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-worker-1",
             executor=mock_executor,
         )
@@ -295,7 +295,7 @@ class TestWorkerPoller:
             )
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-worker-1",
             executor=lambda x: None,
             max_slots=3,  # Limit to 3 concurrent tasks
@@ -345,7 +345,7 @@ class TestWorkerPoller:
             )
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-worker-1",
             executor=mock_executor,
         )
@@ -404,7 +404,7 @@ class TestWorkerPoller:
             raise RetryTaskAt(retry_at=datetime.now(timezone.utc), message="TimeoutError during recall")
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-worker-1",
             executor=failing_executor,
         )
@@ -458,7 +458,7 @@ class TestWorkerPoller:
             raise ValueError("Non-retryable error")
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-worker-1",
             executor=failing_executor,
         )
@@ -525,7 +525,7 @@ class TestWorkerPoller:
             # Returns normally - this is the key: executor does NOT re-raise
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-worker-1",
             executor=executor_that_marks_failed,
         )
@@ -582,7 +582,7 @@ class TestWorkerPoller:
             raise DeferOperation(exec_date=defer_until, reason="upstream quota window not yet open")
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-worker-1",
             executor=deferring_executor,
         )
@@ -632,7 +632,7 @@ class TestWorkerPoller:
         )
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-worker-1",
             executor=lambda x: None,
         )
@@ -717,7 +717,7 @@ class TestWorkerPoller:
             await validator.validate_retain(ctx)
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-worker-1",
             executor=executor_calling_validator,
         )
@@ -877,7 +877,7 @@ class TestWorkerPoller:
         )
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-worker-1",
             executor=lambda x: None,
         )
@@ -935,7 +935,7 @@ class TestWorkerPoller:
         )
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-worker-1",
             executor=lambda x: None,
         )
@@ -978,7 +978,7 @@ class TestWorkerRecovery:
 
         # Create poller with same worker_id and call recover
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id=worker_id,
             executor=lambda x: None,
         )
@@ -1034,7 +1034,7 @@ class TestWorkerRecovery:
 
         # Worker-1 recovers its tasks
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="worker-1",
             executor=lambda x: None,
         )
@@ -1064,7 +1064,7 @@ class TestWorkerRecovery:
         from hindsight_api.worker import WorkerPoller
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="fresh-worker",
             executor=lambda x: None,
         )
@@ -1106,7 +1106,7 @@ class TestConcurrentWorkers:
 
         async def claim_for_worker(worker_id: str):
             poller = WorkerPoller(
-                pool=pool,
+                backend=pool,
                 worker_id=worker_id,
                 executor=lambda x: None,
             )
@@ -1181,7 +1181,7 @@ class TestConcurrentWorkers:
 
         # New worker should only claim the 3 pending tasks
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="new-worker",
             executor=lambda x: None,
         )
@@ -1491,7 +1491,7 @@ class TestWorkerTaskBackend:
             await backend.submit_task(child_payload)
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-worker-1",
             executor=executor,
         )
@@ -1572,7 +1572,7 @@ class TestDynamicTenantDiscovery:
             )
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-worker-1",
             executor=lambda x: None,
             tenant_extension=mock_extension,
@@ -1639,7 +1639,7 @@ class TestDynamicTenantDiscovery:
         )
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-worker-1",
             executor=lambda x: None,
             tenant_extension=dynamic_extension,
@@ -1701,7 +1701,7 @@ class TestDynamicTenantDiscovery:
 
         # No tenant_extension provided
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-worker-1",
             executor=lambda x: None,
         )
@@ -1753,7 +1753,7 @@ class TestDynamicTenantDiscovery:
 
             # Create poller with custom schema
             poller = WorkerPoller(
-                pool=pool,
+                backend=pool,
                 worker_id="test-worker-custom-schema",
                 executor=lambda x: None,
                 schema=test_schema,
@@ -1824,7 +1824,7 @@ async def test_worker_fire_and_forget_nonblocking(pool, clean_operations):
         await finish.wait()
 
     poller = WorkerPoller(
-        pool=pool,
+        backend=pool,
         worker_id="test-worker",
         executor=blocking_executor,
         poll_interval_ms=50,  # Fast polling
@@ -1941,7 +1941,7 @@ async def test_worker_slot_limits_enforced(pool, clean_operations):
         await event.wait()
 
     poller = WorkerPoller(
-        pool=pool,
+        backend=pool,
         worker_id="test-worker",
         executor=controlled_executor,
         poll_interval_ms=50,
@@ -2037,7 +2037,7 @@ async def test_consolidation_slots_reserved_when_retain_saturates(pool, clean_op
         await event.wait()
 
     poller = WorkerPoller(
-        pool=pool,
+        backend=pool,
         worker_id="test-worker-consolidation-reservation",
         executor=blocking_executor,
         poll_interval_ms=50,
@@ -2146,7 +2146,7 @@ async def test_per_operation_slot_reservations(pool, clean_operations):
         await event.wait()
 
     poller = WorkerPoller(
-        pool=pool,
+        backend=pool,
         worker_id="test-worker-per-op-slots",
         executor=blocking_executor,
         poll_interval_ms=50,
@@ -2248,7 +2248,7 @@ async def test_shared_pool_usable_by_reserved_types(pool, clean_operations):
         await event.wait()
 
     poller = WorkerPoller(
-        pool=pool,
+        backend=pool,
         worker_id="test-worker-shared-overflow",
         executor=blocking_executor,
         poll_interval_ms=50,
@@ -2318,7 +2318,7 @@ async def test_pending_breakdown_explains_unclaimable_rows(pool, clean_operation
     from hindsight_api.worker.poller import WorkerPoller
 
     poller = WorkerPoller(
-        pool=pool,
+        backend=pool,
         worker_id="test-worker-pending-breakdown",
         executor=lambda _t: asyncio.sleep(0),
         poll_interval_ms=50,
@@ -2460,7 +2460,7 @@ class TestMarkFailedParentPropagation:
             result_metadata={"parent_operation_id": str(parent_id)},
         )
 
-        poller = WorkerPoller(pool=pool, worker_id="test-worker-1", executor=lambda x: None)
+        poller = WorkerPoller(backend=pool, worker_id="test-worker-1", executor=lambda x: None)
         await poller._mark_failed(str(child2_id), "DB constraint violation", schema=None)
 
         # child2 must be failed
@@ -2497,7 +2497,7 @@ class TestMarkFailedParentPropagation:
             result_metadata={"parent_operation_id": str(parent_id)},
         )
 
-        poller = WorkerPoller(pool=pool, worker_id="test-worker-1", executor=lambda x: None)
+        poller = WorkerPoller(backend=pool, worker_id="test-worker-1", executor=lambda x: None)
         await poller._mark_failed(str(child_id), "unexpected error", schema=None)
 
         parent_row = await pool.fetchrow("SELECT status FROM async_operations WHERE operation_id = $1", parent_id)
@@ -2536,7 +2536,7 @@ class TestMarkFailedParentPropagation:
             result_metadata={"parent_operation_id": str(parent_id)},
         )
 
-        poller = WorkerPoller(pool=pool, worker_id="test-worker-1", executor=lambda x: None)
+        poller = WorkerPoller(backend=pool, worker_id="test-worker-1", executor=lambda x: None)
         await poller._mark_failed(str(child1_id), "early failure", schema=None)
 
         # child1 is failed
@@ -2560,7 +2560,7 @@ class TestMarkFailedParentPropagation:
         op_id = uuid.uuid4()
         await self._insert_op(pool, op_id=op_id, bank_id=bank_id, operation_type="retain", status="processing")
 
-        poller = WorkerPoller(pool=pool, worker_id="test-worker-1", executor=lambda x: None)
+        poller = WorkerPoller(backend=pool, worker_id="test-worker-1", executor=lambda x: None)
         # Must not raise
         await poller._mark_failed(str(op_id), "standalone failure", schema=None)
 
@@ -2593,7 +2593,7 @@ class TestMarkFailedParentPropagation:
         async def crashing_executor(task_dict):
             raise RuntimeError("Simulated DB constraint violation — transaction rolled back")
 
-        poller = WorkerPoller(pool=pool, worker_id="test-worker-1", executor=crashing_executor)
+        poller = WorkerPoller(backend=pool, worker_id="test-worker-1", executor=crashing_executor)
 
         task_dict = {"type": "retain", "operation_id": str(child_id), "bank_id": bank_id}
         claimed_task = ClaimedTask(operation_id=str(child_id), task_dict=task_dict, schema=None)
@@ -2643,7 +2643,7 @@ class TestClaimBatchRotation:
                 return [Tenant(schema=s) for s in schemas]
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-rotation",
             executor=lambda x: None,
             tenant_extension=StaticTenantExtension(),
@@ -2769,7 +2769,7 @@ class TestClaimBatchRotation:
         await _ensure_bank(pool, bank_id)
 
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-scan",
             executor=lambda x: None,
         )
@@ -2816,7 +2816,7 @@ class TestClaimBatchRotation:
 
         schemas_claimed: list[str | None] = []
         poller = WorkerPoller(
-            pool=pool,
+            backend=pool,
             worker_id="test-pipeline",
             executor=lambda x: None,
         )

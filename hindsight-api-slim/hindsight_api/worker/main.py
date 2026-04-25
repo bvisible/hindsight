@@ -227,7 +227,7 @@ def main():
 
         schema = None if config.database_schema == DEFAULT_DATABASE_SCHEMA else config.database_schema
         poller = WorkerPoller(
-            pool=memory._pool,
+            backend=memory._backend,
             worker_id=args.worker_id,
             executor=memory.execute_task,
             poll_interval_ms=args.poll_interval,

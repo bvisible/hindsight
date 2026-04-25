@@ -246,8 +246,8 @@ class DatabaseBackend(ABC):
     def supports_worker_poller(self) -> bool:
         """Whether this backend supports the async WorkerPoller.
 
-        WorkerPoller uses raw asyncpg pool APIs and PG-specific SQL.
-        Backends that don't support it use SyncTaskBackend instead.
+        WorkerPoller is backend-agnostic (uses DatabaseBackend.acquire()).
+        All current backends (PostgreSQL, Oracle) support it.
         """
         return True
 
@@ -260,10 +260,9 @@ class DatabaseBackend(ABC):
         raise NotImplementedError(f"{type(self).__name__} must implement run_migrations()")
 
     def create_task_backend(self, *, pool_getter: Any = None, schema_getter: Any = None) -> Any:
-        """Create the appropriate task backend for this database.
+        """Create the task backend for this database.
 
-        PG uses BrokerTaskBackend for async worker/poller execution.
-        Oracle uses SyncTaskBackend for inline execution.
+        All backends use BrokerTaskBackend for async worker/poller execution.
         """
         from ..task_backend import BrokerTaskBackend
 

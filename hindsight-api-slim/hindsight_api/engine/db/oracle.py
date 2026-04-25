@@ -12,9 +12,6 @@ Requires: python-oracledb (thin mode — pure Python, no Oracle client needed).
 
 Known limitations (single-tenant OSS only):
 - Multi-tenant schema isolation (CURRENT_SCHEMA per session) is not yet implemented.
-- task_backend, worker/poller, webhooks/manager, engine/audit, and config_resolver
-  still use raw asyncpg pool APIs with PG-specific SQL. These paths need Oracle
-  implementations before Oracle can support async operations and background workers.
 """
 
 import datetime
@@ -1029,7 +1026,7 @@ class OracleBackend(DatabaseBackend):
 
     @property
     def supports_worker_poller(self) -> bool:
-        return False
+        return True
 
     def run_migrations(self, dsn: str, *, schema: str | None = None) -> None:
         """Run Oracle DDL migrations."""
@@ -1038,10 +1035,10 @@ class OracleBackend(DatabaseBackend):
         run_oracle_migrations(dsn, schema=schema)
 
     def create_task_backend(self, *, pool_getter: Any = None, schema_getter: Any = None) -> Any:
-        """Oracle uses SyncTaskBackend — async worker/poller not yet supported."""
-        from ..task_backend import SyncTaskBackend
+        """Oracle now uses BrokerTaskBackend — worker/poller is backend-agnostic."""
+        from ..task_backend import BrokerTaskBackend
 
-        return SyncTaskBackend()
+        return BrokerTaskBackend(pool_getter=pool_getter, schema_getter=schema_getter)
 
     def __init__(self) -> None:
         self._pool: Any = None

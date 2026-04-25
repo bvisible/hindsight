@@ -132,6 +132,8 @@ _DDL_TABLES = [
             OR (confidence_score >= 0.0 AND confidence_score <= 1.0)
         )
     )
+    PARTITION BY LIST (bank_id) AUTOMATIC
+    (PARTITION p_default VALUES ('__default__'))
     """,
     # -----------------------------------------------------------------------
     # 5. ENTITIES
@@ -322,6 +324,20 @@ _DDL_TABLES = [
         CONSTRAINT pk_audit_log PRIMARY KEY (id)
     )
     """,
+    # -----------------------------------------------------------------------
+    # 11. OBSERVATION_SOURCES — junction table replacing source_memory_ids
+    # column. Enables standard SQL joins instead of dialect-specific array
+    # operators (PG unnest/&&) or JSON_TABLE (Oracle).
+    # -----------------------------------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS observation_sources (
+        observation_id    RAW(16)        NOT NULL,
+        source_id         RAW(16)        NOT NULL,
+        CONSTRAINT pk_observation_sources PRIMARY KEY (observation_id, source_id),
+        CONSTRAINT fk_obs_src_observation FOREIGN KEY (observation_id)
+            REFERENCES memory_units(id) ON DELETE CASCADE
+    )
+    """,
 ]
 
 
@@ -404,6 +420,11 @@ _DDL_INDEXES = [
     _idx("idx_al_action_started", "CREATE INDEX idx_al_action_started ON audit_log(action, started_at DESC)"),
     _idx("idx_al_bank_started", "CREATE INDEX idx_al_bank_started ON audit_log(bank_id, started_at DESC)"),
     _idx("idx_al_started", "CREATE INDEX idx_al_started ON audit_log(started_at DESC)"),
+    # --- observation_sources ---
+    _idx(
+        "idx_obs_sources_source_id",
+        "CREATE INDEX idx_obs_sources_source_id ON observation_sources(source_id, observation_id)",
+    ),
 ]
 
 
@@ -499,6 +520,38 @@ def run_oracle_migrations(dsn: str, *, schema: str | None = None) -> None:
                     logger.error("Failed to create table (statement %d): %s", i, e)
                     raise
 
+        # Convert memory_units to automatic list partitioning on bank_id.
+        # New installs get this from CREATE TABLE; this handles existing installs.
+        # Oracle 12.2+ supports online conversion via ALTER TABLE MODIFY.
+        #
+        # IMPORTANT: ALTER TABLE MODIFY PARTITION invalidates CTXSYS.CONTEXT
+        # domain indexes (ORA-29861). We drop the text index before conversion
+        # and recreate it afterward. The text index creation below handles both
+        # fresh installs and this post-conversion recreation.
+        try:
+            # Drop text index first if it exists — it will be invalidated by partitioning.
+            try:
+                cursor.execute("DROP INDEX idx_mu_content_text FORCE")
+                conn.commit()
+                logger.debug("Dropped text index before partitioning conversion")
+            except oracledb.DatabaseError:
+                pass  # Index doesn't exist yet (fresh install)
+
+            cursor.execute("""
+                ALTER TABLE memory_units MODIFY
+                PARTITION BY LIST (bank_id) AUTOMATIC
+                (PARTITION p_default VALUES ('__default__'))
+            """)
+            conn.commit()
+            logger.info("memory_units partitioned by bank_id (automatic list)")
+        except oracledb.DatabaseError as e:
+            err = e.args[0]
+            # ORA-14504: table is already partitioned — safe to ignore
+            if hasattr(err, "code") and err.code == 14504:
+                logger.debug("memory_units already partitioned")
+            else:
+                logger.debug("Partitioning memory_units skipped: %s", e)
+
         # Create B-tree indexes
         for idx_ddl in _DDL_INDEXES:
             try:
@@ -520,6 +573,30 @@ def run_oracle_migrations(dsn: str, *, schema: str | None = None) -> None:
             conn.commit()
         except oracledb.DatabaseError as e:
             logger.debug("Text index creation (may already exist): %s", e)
+
+        # Backfill observation_sources from source_memory_ids CLOB (JSON array).
+        # Uses MERGE to be idempotent — safe to run multiple times.
+        try:
+            cursor.execute("""
+                MERGE INTO observation_sources tgt
+                USING (
+                    SELECT mu.id AS observation_id,
+                           HEXTORAW(jt.source_id) AS source_id
+                    FROM memory_units mu,
+                         JSON_TABLE(mu.source_memory_ids, '$[*]'
+                             COLUMNS (source_id VARCHAR2(36) PATH '$')
+                         ) jt
+                    WHERE mu.fact_type = 'observation'
+                      AND mu.source_memory_ids IS NOT NULL
+                ) src
+                ON (tgt.observation_id = src.observation_id AND tgt.source_id = src.source_id)
+                WHEN NOT MATCHED THEN
+                    INSERT (observation_id, source_id) VALUES (src.observation_id, src.source_id)
+            """)
+            conn.commit()
+            logger.info("observation_sources backfill completed")
+        except oracledb.DatabaseError as e:
+            logger.debug("observation_sources backfill (may be empty or already done): %s", e)
 
         logger.info("Oracle schema migrations completed successfully")
 

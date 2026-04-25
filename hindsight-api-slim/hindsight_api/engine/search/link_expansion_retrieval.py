@@ -384,9 +384,9 @@ class LinkExpansionRetriever(GraphRetriever):
         mu = fq_table("memory_units")
         per_entity_limit = config.link_expansion_per_entity_limit
 
-        # Delegate to DataAccessOps which handles the fundamental difference:
-        # PG uses native array ops (unnest, &&) on source_memory_ids,
-        # Oracle uses JSON_TABLE to explode the CLOB JSON array.
+        # Delegate to DataAccessOps. Both backends now use the observation_sources
+        # junction table with standard SQL joins (previously PG used native array
+        # ops and Oracle used JSON_TABLE).
         return await ops.expand_observations(
             conn,
             mu,

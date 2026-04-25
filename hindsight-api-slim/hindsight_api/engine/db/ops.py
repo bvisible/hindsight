@@ -249,8 +249,8 @@ class DataAccessOps(ABC):
     ) -> tuple[list[ResultRow], list[ResultRow], list[ResultRow]]:
         """Observation-specific graph expansion.
 
-        PG uses native array ops (&&, unnest) on source_memory_ids.
-        Non-PG uses JSON_TABLE to explode source_memory_ids CLOB.
+        Both backends use the observation_sources junction table with standard
+        SQL joins. Previously PG used native array ops and Oracle used JSON_TABLE.
         """
         ...
 
