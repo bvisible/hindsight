@@ -10,8 +10,7 @@ columns and rewrites PG-specific SQL patterns.
 
 Requires: python-oracledb (thin mode — pure Python, no Oracle client needed).
 
-Known limitations (single-tenant OSS only):
-- Multi-tenant schema isolation (CURRENT_SCHEMA per session) is not yet implemented.
+Supports multi-tenant schema isolation via ALTER SESSION SET CURRENT_SCHEMA.
 """
 
 import datetime
@@ -1083,11 +1082,29 @@ class OracleBackend(DatabaseBackend):
             self._pool = None
             logger.info("Oracle pool closed")
 
+    async def _set_session_schema(self, conn: Any) -> None:
+        """Set the session schema on an Oracle connection.
+
+        Uses ALTER SESSION SET CURRENT_SCHEMA so that all unqualified table
+        references resolve to the tenant's schema. This is Oracle's equivalent
+        of PostgreSQL's SET search_path — fq_table() returns bare table names
+        for Oracle, relying on this session-level setting for isolation.
+        """
+        # Lazy import to avoid circular dependency (memory_engine → db → memory_engine).
+        from ..memory_engine import get_current_schema
+
+        schema = get_current_schema()
+        if schema and schema != "public":
+            cursor = conn.cursor()
+            await cursor.execute(f'ALTER SESSION SET CURRENT_SCHEMA = "{schema}"')
+            await cursor.close()
+
     @asynccontextmanager
     async def acquire(self) -> AsyncIterator[OracleConnection]:
         pool = self._ensure_pool()
         conn = await pool.acquire()
         try:
+            await self._set_session_schema(conn)
             yield OracleConnection(conn)
             # Auto-commit on clean exit (asyncpg uses autocommit by default;
             # oracledb does not, so we must commit explicitly)
@@ -1103,6 +1120,7 @@ class OracleBackend(DatabaseBackend):
         pool = self._ensure_pool()
         conn = await pool.acquire()
         try:
+            await self._set_session_schema(conn)
             yield OracleConnection(conn)
             await conn.commit()
         except Exception:
