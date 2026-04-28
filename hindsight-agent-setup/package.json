@@ -1,0 +1,16 @@
+{
+  "name": "@vectorize-io/hindsight-agent-setup",
+  "version": "0.1.0",
+  "description": "Setup self-learning wiki for AI agents on any harness",
+  "type": "module",
+  "bin": {
+    "hindsight-agent-setup": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "typescript": "^5.4"
+  }
+}
