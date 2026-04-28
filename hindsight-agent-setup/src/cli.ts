@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * hindsight-agent setup — set up a self-learning agent from a directory.
+ * self-driving-agents — install a self-driving agent from a directory.
  *
- * npx @vectorize-io/hindsight-agent setup <dir> --harness openclaw|hermes|claude-code [--agent <name>]
+ * npx @vectorize-io/self-driving-agents install <dir> --harness openclaw|hermes|claude-code [--agent <name>]
  *
  * Directory layout:
  *   bank-template.json   — optional: bank config + mental models + directives
@@ -155,7 +155,7 @@ async function main() {
   const args = process.argv.slice(2);
 
   if (args.length < 1 || args[0] === "--help" || args[0] === "-h") {
-    console.log(`Usage: npx @vectorize-io/hindsight-agent setup <dir> --harness <harness> [--agent <name>]
+    console.log(`Usage: npx @vectorize-io/self-driving-agents install <dir> --harness <harness> [--agent <name>]
 
 Arguments:
   <dir>              Agent directory (contains optional bank-template.json + content/)
@@ -168,9 +168,9 @@ Options:
     process.exit(0);
   }
 
-  // Skip "setup" if passed as first arg
-  let dirArg = args[0] === "setup" ? args[1] : args[0];
-  const restArgs = args[0] === "setup" ? args.slice(2) : args.slice(1);
+  // Skip "install" or "setup" if passed as first arg
+  let dirArg = (args[0] === "install" || args[0] === "setup") ? args[1] : args[0];
+  const restArgs = (args[0] === "install" || args[0] === "setup") ? args.slice(2) : args.slice(1);
 
   if (!dirArg) {
     console.error("Error: directory argument required");
