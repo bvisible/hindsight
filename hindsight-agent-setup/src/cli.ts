@@ -1,77 +1,70 @@
 #!/usr/bin/env node
 /**
- * hindsight-agent-setup — set up self-learning wiki for AI agents.
+ * hindsight-agent setup — set up a self-learning agent from a directory.
  *
- * npx @vectorize-io/hindsight-agent-setup <harness> <agent-id> [options]
+ * npx @vectorize-io/hindsight-agent setup <dir> --harness openclaw|hermes|claude-code [--agent <name>]
  *
- * Supports: openclaw, hermes, claude-code, codex
+ * Directory layout:
+ *   bank-template.json   — optional: bank config + mental models + directives
+ *   content/             — optional: reference docs to ingest (.md, .txt, etc.)
  *
- * Reads the harness config to resolve Hindsight API + bank ID, then:
- * 1. Health check
- * 2. Import bank template (if provided)
- * 3. Ingest content files (if provided)
- * 4. Install agent-knowledge skill
- * 5. Patch startup file to auto-load skill
+ * The agent name defaults to the directory name.
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from "fs";
-import { join, resolve, extname } from "path";
+import { join, resolve, extname, basename } from "path";
 import { homedir } from "os";
-import { execSync } from "child_process";
 
-// ── Skill template ──────────────────────────────────────
+// ── Skill ───────────────────────────────────────────────
 
 const SKILL_MD = `---
 name: agent-knowledge
-description: Manage your long-term knowledge pages. Read pages before acting. Create new pages for recurring topics. The system keeps pages updated from your conversations.
+description: Your long-term knowledge pages. Read them at session start. Create new pages for recurring topics. Pages auto-update from your conversations.
 ---
 
 # Agent Knowledge
 
-Use the \`hindsight_wiki_*\` tools to manage your knowledge pages.
+You have knowledge pages that persist across sessions and auto-update from your conversations.
 
-## Startup
+**How it works:** Conversations are retained into Hindsight. The system extracts observations and rebuilds each page via its "source query." You create pages; the system maintains them.
 
-At session start, call \`hindsight_wiki_list\` to read your pages.
+## At session start
+
+Call \`agent_knowledge_list_pages\` to load your knowledge. Apply what you read.
 
 ## Tools
 
-- \`hindsight_wiki_list\` — list all pages
-- \`hindsight_wiki_get(page_id)\` — read a page
-- \`hindsight_wiki_create(page_id, name, source_query)\` — create a page
-  Always set: trigger_refresh_after_consolidation=true, trigger_mode="delta",
-  trigger_exclude_mental_models=true, trigger_fact_types=["observation"], max_tokens=4096
-- \`hindsight_wiki_update(page_id, name?, source_query?)\` — update a page
-- \`hindsight_wiki_delete(page_id)\` — delete a page
-- \`hindsight_wiki_recall(query)\` — search memories
-- \`hindsight_wiki_ingest(title, content)\` — upload a document (never summarize, pass raw)
+- \`agent_knowledge_list_pages()\` — all pages with content
+- \`agent_knowledge_get_page(page_id)\` — one page in detail
+- \`agent_knowledge_create_page(page_id, name, source_query)\` — create a page
+- \`agent_knowledge_update_page(page_id, name?, source_query?)\` — update a page
+- \`agent_knowledge_delete_page(page_id)\` — delete a page
+- \`agent_knowledge_recall(query)\` — search all memories
+- \`agent_knowledge_ingest(title, content)\` — upload raw content (never summarize)
 
 ## Creating pages
 
-Create when: user states a durable preference, you find a working procedure, you have performance data.
-The source_query is a question the system re-asks to rebuild the page from observations.
+Create when you learn something durable — preferences, procedures, performance data.
+The source_query is a question the system re-asks to rebuild the page.
 
-Source query patterns:
-- Best practices: "What are the best practices for [topic], preferring our data over industry advice?"
-- Preferences: "What are the user's preferences for [topic]?"
-- Performance: "What [topic] strategies have performed well or poorly? Include numbers."
+Examples:
+- "What are the user's preferences for tone, length, and formatting?"
+- "What strategies have performed well or poorly? Include numbers."
+- "What are the best practices for [topic], preferring our data over generic advice?"
 
 ## Rules
 
-- Never edit page content directly — the system synthesizes it
-- Create pages silently — don't announce it
-- Prefer fewer broader pages
-- State preferences explicitly in responses so the system captures them
+- Pages update automatically — don't edit content directly
+- State preferences clearly in responses so the system captures them
+- Create pages silently
+- Prefer fewer broad pages over many narrow ones
 `;
 
-// ── HTTP helper ─────────────────────────────────────────
+// ── HTTP ────────────────────────────────────────────────
 
 async function api(
-  baseUrl: string,
-  path: string,
-  method: string,
-  body?: unknown,
-  token?: string,
+  baseUrl: string, path: string, method: string,
+  body?: unknown, token?: string,
 ): Promise<unknown> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -80,7 +73,7 @@ async function api(
   const resp = await fetch(`${baseUrl}${path}`, opts);
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
-    throw new Error(`HTTP ${resp.status} on ${method} ${path}: ${text.slice(0, 200)}`);
+    throw new Error(`HTTP ${resp.status}: ${text.slice(0, 200)}`);
   }
   return resp.json().catch(() => ({}));
 }
@@ -92,20 +85,19 @@ interface HarnessInfo {
   bankId: string;
   apiToken?: string;
   workspaceDir: string;
-  startupFile?: string; // file to patch for auto-loading skill
-  startupPatch?: string; // text to inject
+  startupFile?: string;
+  startupPatch?: string;
 }
 
 function resolveOpenclaw(agentId: string): HarnessInfo {
   const configPath = join(homedir(), ".openclaw", "openclaw.json");
-  if (!existsSync(configPath)) throw new Error("OpenClaw config not found at ~/.openclaw/openclaw.json");
+  if (!existsSync(configPath)) throw new Error("~/.openclaw/openclaw.json not found. Is OpenClaw installed?");
   const config = JSON.parse(readFileSync(configPath, "utf-8"));
   const pc = config.plugins?.entries?.["hindsight-openclaw"]?.config || {};
 
   const apiUrl = pc.hindsightApiUrl || `http://localhost:${pc.apiPort || 9077}`;
   const apiToken = pc.hindsightApiToken || undefined;
 
-  // Bank resolution (same logic as deriveBankId)
   let bankId: string;
   if (pc.dynamicBankId === false && pc.bankId) {
     bankId = pc.bankId;
@@ -116,16 +108,7 @@ function resolveOpenclaw(agentId: string): HarnessInfo {
     bankId = pc.bankIdPrefix ? `${pc.bankIdPrefix}-${base}` : base;
   }
 
-  // Find workspace
-  const agents = config.agents || {};
-  let workspace = join(homedir(), ".hindsight-agents", "openclaw", agentId);
-  for (const [, agentConf] of Object.entries(agents) as [string, any][]) {
-    if (agentConf.name === agentId && agentConf.workspaceDir) {
-      workspace = agentConf.workspaceDir;
-      break;
-    }
-  }
-
+  const workspace = join(homedir(), ".hindsight-agents", "openclaw", agentId);
   return {
     apiUrl, bankId, apiToken, workspaceDir: workspace,
     startupFile: join(workspace, "AGENTS.md"),
@@ -134,45 +117,36 @@ function resolveOpenclaw(agentId: string): HarnessInfo {
 }
 
 function resolveHermes(agentId: string): HarnessInfo {
-  const hermesHome = join(homedir(), ".hermes");
-  // Read hermes config for the profile
-  const profileDir = agentId === "default" ? hermesHome : join(hermesHome, "profiles", agentId);
-  let configPath = join(profileDir, "config.yaml");
-  // For bank, read the hindsight memory provider config
-  // Simple: use static bank = agentId
-  const bankId = agentId;
-  const apiUrl = "http://localhost:8888"; // default, overridable via --api-url
-
   return {
-    apiUrl, bankId, workspaceDir: hermesHome,
-    startupFile: existsSync(join(profileDir, "SOUL.md")) ? join(profileDir, "SOUL.md") : undefined,
-    startupPatch: "## Mandatory: Agent Knowledge\n\nAt the start of every session, load the `agent-knowledge` skill and execute its mandatory startup sequence.",
+    apiUrl: "http://localhost:8888",
+    bankId: agentId,
+    workspaceDir: join(homedir(), ".hermes"),
+    startupFile: agentId === "default"
+      ? join(homedir(), ".hermes", "SOUL.md")
+      : join(homedir(), ".hermes", "profiles", agentId, "SOUL.md"),
+    startupPatch: "## Mandatory: Agent Knowledge\n\nAt session start, load the `agent-knowledge` skill and execute its startup sequence.",
   };
 }
 
 function resolveClaudeCode(_agentId: string): HarnessInfo {
-  const settingsPath = join(homedir(), ".claude", "plugins", "hindsight-claude-code", "settings.json");
-  let apiUrl = "http://localhost:8888";
-  let bankId = "claude_code";
-  let apiToken: string | undefined;
-
-  if (existsSync(settingsPath)) {
-    const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-    if (settings.hindsightApiUrl) apiUrl = settings.hindsightApiUrl;
-    if (settings.bankId) bankId = settings.bankId;
-    if (settings.hindsightApiToken) apiToken = settings.hindsightApiToken;
-  }
-
-  return { apiUrl, bankId, apiToken, workspaceDir: join(homedir(), ".claude") };
+  return {
+    apiUrl: "http://localhost:8888",
+    bankId: "claude_code",
+    workspaceDir: join(homedir(), ".claude"),
+  };
 }
 
-function resolveHarness(harness: string, agentId: string): HarnessInfo {
+function resolveHarness(harness: string, agentId: string, apiUrlOverride?: string, apiTokenOverride?: string): HarnessInfo {
+  let info: HarnessInfo;
   switch (harness) {
-    case "openclaw": return resolveOpenclaw(agentId);
-    case "hermes": return resolveHermes(agentId);
-    case "claude-code": return resolveClaudeCode(agentId);
+    case "openclaw": info = resolveOpenclaw(agentId); break;
+    case "hermes": info = resolveHermes(agentId); break;
+    case "claude-code": info = resolveClaudeCode(agentId); break;
     default: throw new Error(`Unknown harness: ${harness}. Supported: openclaw, hermes, claude-code`);
   }
+  if (apiUrlOverride) info.apiUrl = apiUrlOverride;
+  if (apiTokenOverride) info.apiToken = apiTokenOverride;
+  return info;
 }
 
 // ── Main ────────────────────────────────────────────────
@@ -180,78 +154,115 @@ function resolveHarness(harness: string, agentId: string): HarnessInfo {
 async function main() {
   const args = process.argv.slice(2);
 
-  if (args.length < 2 || args.includes("--help")) {
-    console.log(`Usage: npx @vectorize-io/hindsight-agent-setup <harness> <agent-id> [options]
+  if (args.length < 1 || args[0] === "--help" || args[0] === "-h") {
+    console.log(`Usage: npx @vectorize-io/hindsight-agent setup <dir> --harness <harness> [--agent <name>]
 
-Harnesses: openclaw, hermes, claude-code
+Arguments:
+  <dir>              Agent directory (contains optional bank-template.json + content/)
 
 Options:
-  --template <path>   Bank template JSON to import
-  --content <dir>     Directory of files to ingest (.md, .txt, .html, .json)
-  --api-url <url>     Override Hindsight API URL
-  --api-token <token> Override API token`);
+  --harness <h>      Required. openclaw | hermes | claude-code
+  --agent <name>     Agent name (defaults to directory name)
+  --api-url <url>    Override Hindsight API URL
+  --api-token <t>    Override API token`);
     process.exit(0);
   }
 
-  const harness = args[0];
-  const agentId = args[1];
-  let templatePath: string | undefined;
-  let contentDir: string | undefined;
+  // Skip "setup" if passed as first arg
+  let dirArg = args[0] === "setup" ? args[1] : args[0];
+  const restArgs = args[0] === "setup" ? args.slice(2) : args.slice(1);
+
+  if (!dirArg) {
+    console.error("Error: directory argument required");
+    process.exit(1);
+  }
+
+  let harness: string | undefined;
+  let agentName: string | undefined;
   let apiUrlOverride: string | undefined;
   let apiTokenOverride: string | undefined;
 
-  for (let i = 2; i < args.length; i++) {
-    if (args[i] === "--template" && args[i + 1]) templatePath = args[++i];
-    else if (args[i] === "--content" && args[i + 1]) contentDir = args[++i];
-    else if (args[i] === "--api-url" && args[i + 1]) apiUrlOverride = args[++i];
-    else if (args[i] === "--api-token" && args[i + 1]) apiTokenOverride = args[++i];
+  for (let i = 0; i < restArgs.length; i++) {
+    if (restArgs[i] === "--harness" && restArgs[i + 1]) harness = restArgs[++i];
+    else if (restArgs[i] === "--agent" && restArgs[i + 1]) agentName = restArgs[++i];
+    else if (restArgs[i] === "--api-url" && restArgs[i + 1]) apiUrlOverride = restArgs[++i];
+    else if (restArgs[i] === "--api-token" && restArgs[i + 1]) apiTokenOverride = restArgs[++i];
   }
 
-  // Resolve harness config
-  const info = resolveHarness(harness, agentId);
-  const apiUrl = apiUrlOverride || info.apiUrl;
-  const apiToken = apiTokenOverride || info.apiToken;
-  const bankId = info.bankId;
+  if (!harness) {
+    console.error("Error: --harness is required (openclaw | hermes | claude-code)");
+    process.exit(1);
+  }
 
-  console.log(`Setting up wiki for '${agentId}' on ${harness}`);
-  console.log(`  API:       ${apiUrl}`);
-  console.log(`  Bank:      ${bankId}`);
+  const dir = resolve(dirArg);
+  if (!existsSync(dir)) {
+    console.error(`Error: directory not found: ${dir}`);
+    process.exit(1);
+  }
+
+  const agentId = agentName || basename(dir);
+  const info = resolveHarness(harness, agentId, apiUrlOverride, apiTokenOverride);
+
+  console.log(`Setting up '${agentId}' on ${harness}`);
+  console.log(`  Directory: ${dir}`);
+  console.log(`  Bank:      ${info.bankId}`);
+  console.log(`  API:       ${info.apiUrl}`);
   console.log(`  Workspace: ${info.workspaceDir}`);
   console.log();
 
   // Health check
   try {
-    await api(apiUrl, "/health", "GET", undefined, apiToken);
+    await api(info.apiUrl, "/health", "GET", undefined, info.apiToken);
   } catch {
-    console.error(`Error: Cannot reach Hindsight at ${apiUrl}`);
+    console.error(`Error: Cannot reach Hindsight at ${info.apiUrl}`);
+    console.error("Make sure the Hindsight server or embedded daemon is running.");
     process.exit(1);
   }
 
-  // Import template
-  if (templatePath) {
-    console.log(`Importing template from ${templatePath}...`);
-    const template = JSON.parse(readFileSync(resolve(templatePath), "utf-8"));
-    await api(apiUrl, `/v1/default/banks/${bankId}/import`, "POST", template, apiToken);
+  // Import bank template
+  const templatePath = join(dir, "bank-template.json");
+  if (existsSync(templatePath)) {
+    console.log("Importing bank template...");
+    const template = JSON.parse(readFileSync(templatePath, "utf-8"));
+    await api(info.apiUrl, `/v1/default/banks/${info.bankId}/import`, "POST", template, info.apiToken);
     console.log("  Done.");
   }
 
   // Ingest content
-  if (contentDir) {
-    const dir = resolve(contentDir);
+  const contentDir = join(dir, "content");
+  if (existsSync(contentDir)) {
     const exts = new Set([".md", ".txt", ".html", ".json", ".csv", ".xml"]);
-    const files = readdirSync(dir).filter((f) => exts.has(extname(f).toLowerCase())).sort();
+    const files = readdirSync(contentDir).filter((f) => exts.has(extname(f).toLowerCase())).sort();
     if (files.length > 0) {
-      console.log(`Ingesting ${files.length} file(s) from ${dir}...`);
+      console.log(`Ingesting ${files.length} file(s)...`);
       for (const file of files) {
-        const content = readFileSync(join(dir, file), "utf-8");
+        const content = readFileSync(join(contentDir, file), "utf-8");
         if (!content.trim()) continue;
         const docId = file.replace(/\.[^.]+$/, "");
-        await api(apiUrl, `/v1/default/banks/${bankId}/memories`, "POST", {
-          items: [{ content, document_id: docId }],
-          async: true,
-        }, apiToken);
+        await api(info.apiUrl, `/v1/default/banks/${info.bankId}/memories`, "POST", {
+          items: [{ content, document_id: docId }], async: true,
+        }, info.apiToken);
         console.log(`  ${file} → queued`);
       }
+    }
+  }
+
+  // Create harness agent (openclaw only for now)
+  if (harness === "openclaw") {
+    try {
+      const { execSync } = await import("child_process");
+      // Check if agent exists
+      const listOut = execSync("openclaw agents list --json 2>/dev/null", { encoding: "utf-8" });
+      const agents = JSON.parse(listOut).agents || [];
+      if (!agents.some((a: any) => a.name === agentId)) {
+        mkdirSync(info.workspaceDir, { recursive: true });
+        execSync(`openclaw agents add ${agentId} --workspace ${info.workspaceDir} --non-interactive`, { stdio: "pipe" });
+        console.log(`Created OpenClaw agent '${agentId}'.`);
+      } else {
+        console.log(`Agent '${agentId}' already exists.`);
+      }
+    } catch {
+      console.log(`Note: create agent manually: openclaw agents add ${agentId}`);
     }
   }
 
@@ -259,7 +270,7 @@ Options:
   const skillDir = join(info.workspaceDir, "skills", "agent-knowledge");
   mkdirSync(skillDir, { recursive: true });
   writeFileSync(join(skillDir, "SKILL.md"), SKILL_MD);
-  console.log(`Skill installed to ${skillDir}`);
+  console.log("Skill installed.");
 
   // Patch startup file
   if (info.startupFile && info.startupPatch && existsSync(info.startupFile)) {
@@ -271,14 +282,14 @@ Options:
         text += `\n\n${info.startupPatch}\n`;
       }
       writeFileSync(info.startupFile, text);
-      console.log(`Startup patched: ${info.startupFile}`);
+      console.log("Startup patched.");
     }
   }
 
   console.log();
-  console.log(`Wiki ready for '${agentId}'.`);
+  console.log(`'${agentId}' is ready.`);
   if (harness === "openclaw") console.log("  Restart gateway: openclaw gateway restart");
-  if (harness === "hermes") console.log(`  Chat: hermes --profile ${agentId}`);
+  if (harness === "hermes") console.log(`  Chat: hermes${agentId !== "default" ? ` --profile ${agentId}` : ""}`);
 }
 
 main().catch((err) => {
