@@ -2376,7 +2376,7 @@ ${memoriesFormatted}
             "agent_knowledge_recall",
             "agent_knowledge_ingest",
           ],
-          optional: true,
+          optional: false,
         });
         log.info("wiki tools registered");
       } catch (err) {
