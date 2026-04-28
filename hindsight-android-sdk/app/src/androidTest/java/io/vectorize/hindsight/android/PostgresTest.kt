@@ -64,7 +64,8 @@ class PostgresTest {
                     FileOutputStream(dest).use { out -> inp.copyTo(out) }
                 }
                 dest.setExecutable(true, false)
-                Log.i(TAG, "  Copied $soName -> $name (${dest.length()} bytes)")
+                Runtime.getRuntime().exec(arrayOf("chmod", "755", dest.absolutePath)).waitFor()
+                Log.i(TAG, "  Copied $soName -> $name (${dest.length()} bytes, exec=${dest.canExecute()})")
             } else {
                 Log.w(TAG, "  Missing: $soName in $nativeDir")
             }
@@ -95,77 +96,151 @@ class PostgresTest {
         // Set up LD_LIBRARY_PATH to include both native dir and extracted libs
         val ldPath = "$nativeDir:$baseDir/lib"
 
-        // Step 3: Check postgres version (using correctly-named copy)
-        val versionResult = exec("$pgBinDir/postgres", "--version", env = mapOf("LD_LIBRARY_PATH" to ldPath))
+        // Step 3: Check postgres version
+        // Try pg-bin copy first, fall back to nativeDir .so name
+        val versionResult = try {
+            exec("$pgBinDir/postgres", "--version", env = mapOf("LD_LIBRARY_PATH" to ldPath))
+        } catch (e: Exception) {
+            Log.w(TAG, "pg-bin exec failed (${e.message}), trying nativeDir directly")
+            exec("$nativeDir/libpostgres.so", "--version", env = mapOf("LD_LIBRARY_PATH" to ldPath))
+        }
         Log.i(TAG, "Step 3: $versionResult")
         assertTrue("postgres --version failed: $versionResult", versionResult.contains("PostgreSQL"))
 
-        // Step 4: Run initdb
-        Log.i(TAG, "Step 4: Running initdb...")
+        // Step 4: Manual bootstrap (skips initdb's broken probe)
+        //
+        // initdb's "selecting default max_connections" probe spawns a postgres
+        // subprocess that fails on Android virtual devices. Instead, we:
+        // 1. Let initdb create dirs + configs (--no-clean keeps files on failure)
+        // 2. Write our own postgresql.conf with known-good settings
+        // 3. Run "postgres --boot" to execute the bootstrap SQL (postgres.bki)
+        Log.i(TAG, "Step 4: Manual bootstrap...")
         File(dataDir).deleteRecursively()
         File(dataDir).mkdirs()
 
-        // Tell initdb where to find postgres binary and share data
-        val initdbEnv = mapOf(
+        val pgEnvMap = mapOf(
             "LD_LIBRARY_PATH" to ldPath,
             "TMPDIR" to tmpDir,
-            "PGDATA" to dataDir
+            "PGDATA" to dataDir,
+            "PGSHAREDIR" to "$baseDir/share/postgresql"
         )
 
-        // Test: can postgres run with shared memory?
-        val checkScript = File("$pgBinDir/run_check.sh")
-        checkScript.writeText("""#!/system/bin/sh
+        // 4a: Let initdb create directory structure (it will fail at probe, that's ok)
+        val setupScript = File("$pgBinDir/setup.sh")
+        setupScript.writeText("""#!/system/bin/sh
 export LD_LIBRARY_PATH=$ldPath
 export TMPDIR=$tmpDir
-mkdir -p $dataDir
-# Test if postgres can allocate shared memory (the initdb probe does this)
-$pgBinDir/postgres -C max_connections 2>&1 || true
-# Try starting postgres briefly to test shm
-$pgBinDir/postgres --single -D $dataDir -c shared_buffers=8MB -c dynamic_shared_memory_type=mmap postgres < /dev/null 2>&1 || true
-echo "POSTGRES_CHECK_EXIT=$$?"
+$pgBinDir/initdb -D $dataDir -L $baseDir/share/postgresql --auth=trust --username=hindsight --no-locale --no-clean 2>&1 || true
+echo "SETUP_DONE"
 """)
-        checkScript.setExecutable(true, false)
-        val checkResult = exec("/system/bin/sh", checkScript.absolutePath, env = initdbEnv, timeoutMs = 30_000)
-        Log.i(TAG, "postgres --check result: ${checkResult.take(500)}")
+        setupScript.setExecutable(true, false)
+        val setupResult = exec("/system/bin/sh", setupScript.absolutePath, env = pgEnvMap, timeoutMs = 30_000)
+        Log.i(TAG, "Setup result: ${setupResult.takeLast(200)}")
 
-        // Create a wrapper script so LD_LIBRARY_PATH persists to child processes
-        val wrapperScript = File("$pgBinDir/run_initdb.sh")
-        wrapperScript.writeText("""#!/system/bin/sh
-export LD_LIBRARY_PATH=$ldPath
-export TMPDIR=$tmpDir
-$pgBinDir/initdb -D $dataDir -L $baseDir/share/postgresql --auth=trust --username=hindsight --no-locale -c max_connections=10 -c shared_buffers=16MB -c dynamic_shared_memory_type=mmap --no-clean 2>&1
-echo "EXIT_CODE=$$?"
-""")
-        wrapperScript.setExecutable(true, false)
+        // Verify directory structure was created
+        assertTrue("PG_VERSION not created", File("$dataDir/PG_VERSION").exists())
+        Log.i(TAG, "Directory structure created")
 
-        val initdbResult = exec(
-            "/system/bin/sh", wrapperScript.absolutePath,
-            env = initdbEnv,
-            timeoutMs = 480_000  // initdb probe can take several minutes on virtual devices
+        // 4b: Write our own postgresql.conf with Android-friendly settings
+        // NOTE: no timezone setting - PG can't find timezone data at hardcoded Termux path
+        File("$dataDir/postgresql.conf").writeText("""
+max_connections = 10
+shared_buffers = 16MB
+dynamic_shared_memory_type = mmap
+work_mem = 4MB
+maintenance_work_mem = 16MB
+max_wal_size = 32MB
+log_destination = 'stderr'
+datestyle = 'iso, mdy'
+lc_messages = 'C'
+lc_monetary = 'C'
+lc_numeric = 'C'
+lc_time = 'C'
+default_text_search_config = 'pg_catalog.english'
+listen_addresses = ''
+unix_socket_directories = '$tmpDir'
+""".trimIndent())
+
+        // PG has the Termux share path hardcoded. Try to create it, or binary-patch.
+        // On test devices, /data/data/com.termux doesn't exist, so we can create it.
+        val termuxShareDir = "/data/data/com.termux/files/usr/share/postgresql"
+        val termuxLibDir = "/data/data/com.termux/files/usr/lib"
+        exec("/system/bin/sh", "-c",
+            "mkdir -p $termuxShareDir && cp -r $baseDir/share/postgresql/* $termuxShareDir/ && " +
+            "mkdir -p $termuxLibDir && cp $baseDir/lib/*.so* $termuxLibDir/ 2>/dev/null; " +
+            "mkdir -p $termuxLibDir/postgresql && cp $baseDir/lib/postgresql/*.so* $termuxLibDir/postgresql/ 2>/dev/null; " +
+            "echo TERMUX_DIR_CREATED",
+            env = emptyMap()
         )
-        Log.i(TAG, "initdb result (${initdbResult.length} chars): ${initdbResult.take(500)}")
+        Log.i(TAG, "Termux share dir: ${File("$termuxShareDir/postgres.bki").exists()}")
 
-        // Check if pg_control was created
+        // Create share dir relative to nativeLibDir so PG's path resolution finds it
+        // PG resolves: <binary_dir>/../share/postgresql/
+        // nativeLibDir is like /data/app/.../lib/arm64
+        // So we need:       /data/app/.../lib/share/postgresql/ (one level up from arm64)
+        val nativeParent = File(nativeDir).parent ?: nativeDir
+        val nativeShareDir = "$nativeParent/share/postgresql"
+        File(nativeShareDir).mkdirs()
+        // Symlink our extracted share data there
+        exec("/system/bin/sh", "-c",
+            "ln -sf $baseDir/share/postgresql/* $nativeShareDir/ 2>&1 || cp -r $baseDir/share/postgresql/* $nativeShareDir/",
+            env = emptyMap()
+        )
+        Log.i(TAG, "Share dir linked at: $nativeShareDir (exists: ${File("$nativeShareDir/postgres.bki").exists()})")
+
+        // Also try creating at the pg-bin level: pg-bin/../share/postgresql
+        val pgBinShareDir = "$baseDir/share/postgresql"
+        Log.i(TAG, "Share dir at pgBin/../share: $pgBinShareDir (exists: ${File("$pgBinShareDir/postgres.bki").exists()})")
+
+        // 4c: Run postgres --boot to execute bootstrap SQL
+        val bootScript = File("$pgBinDir/boot.sh")
+        bootScript.writeText("""#!/system/bin/sh
+export LD_LIBRARY_PATH=$ldPath
+export TMPDIR=$tmpDir
+
+# Run bootstrap with postgres --boot
+# This reads postgres.bki from stdin and creates the system catalog
+$pgBinDir/postgres --boot -X 1048576 -F -c dynamic_shared_memory_type=mmap -D $dataDir < $baseDir/share/postgresql/postgres.bki 2>&1
+BOOT_EXIT=${'$'}?
+echo "BOOT_EXIT=${'$'}BOOT_EXIT"
+
+if [ ${'$'}BOOT_EXIT -eq 0 ]; then
+    # Run the additional setup SQL files that initdb normally runs
+    for sql in system_constraints.sql system_functions.sql system_views.sql information_schema.sql; do
+        if [ -f "$baseDir/share/postgresql/${'$'}sql" ]; then
+            echo "Running ${'$'}sql..."
+            $pgBinDir/postgres --single -D $dataDir -c dynamic_shared_memory_type=mmap template1 < "$baseDir/share/postgresql/${'$'}sql" 2>&1 || true
+        fi
+    done
+
+    # Create the default databases
+    $pgBinDir/postgres --single -D $dataDir -c dynamic_shared_memory_type=mmap template1 2>&1 <<EOSQL
+CREATE DATABASE postgres;
+CREATE DATABASE hindsight;
+EOSQL
+    echo "DATABASES_CREATED"
+fi
+""")
+        bootScript.setExecutable(true, false)
+
+        val bootResult = exec("/system/bin/sh", bootScript.absolutePath, env = pgEnvMap, timeoutMs = 300_000)
+        Log.i(TAG, "Boot result (${bootResult.length} chars): ${bootResult.takeLast(500)}")
+
         val pgControlExists = File("$dataDir/global/pg_control").exists()
         Log.i(TAG, "pg_control exists: $pgControlExists")
 
-        // If initdb failed, check what files exist
         if (!pgControlExists) {
-            val dataFiles = File(dataDir).listFiles()?.map { it.name } ?: emptyList()
-            Log.i(TAG, "pg-data contents: $dataFiles")
-            val globalFiles = File("$dataDir/global").listFiles()?.map { it.name } ?: emptyList()
-            Log.i(TAG, "pg-data/global contents: $globalFiles")
-            // Check if share dir exists and has bki
-            val shareExists = File("$baseDir/share/postgresql/postgres.bki").exists()
-            Log.i(TAG, "postgres.bki exists: $shareExists")
+            val globalFiles = File("$dataDir/global").listFiles()?.map { "${it.name} (${it.length()})" } ?: emptyList()
+            Log.i(TAG, "global/ contents: $globalFiles")
         }
-        assertTrue("initdb failed - pg_control missing. Output: ${initdbResult.take(200)}", pgControlExists)
+        assertTrue("Bootstrap failed - pg_control missing. Last output: ${bootResult.takeLast(300)}", pgControlExists)
 
         // Step 5: Start PostgreSQL
         Log.i(TAG, "Step 5: Starting PostgreSQL...")
         val pgEnv = mapOf(
             "LD_LIBRARY_PATH" to ldPath,
-            "TMPDIR" to tmpDir
+            "TMPDIR" to tmpDir,
+            "PGSHAREDIR" to "$baseDir/share/postgresql"
         )
 
         // Start postgres directly (pg_ctl may not find the binary)
@@ -236,7 +311,12 @@ echo "EXIT_CODE=$$?"
 
         env["TMPDIR"]?.let { File(it).mkdirs() }
 
-        val process = pb.start()
+        val process = try {
+            pb.start()
+        } catch (e: java.io.IOException) {
+            Log.e(TAG, "Failed to start: ${command.joinToString(" ")}: ${e.message}")
+            throw e
+        }
 
         // Read output in a separate thread to avoid blocking
         val output = StringBuilder()
