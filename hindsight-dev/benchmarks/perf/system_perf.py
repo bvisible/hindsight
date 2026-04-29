@@ -43,6 +43,7 @@ from benchmarks.perf.recall_perf import (
     FACT_TEMPLATES,
     _build_engine,
     _fill_template,
+    _insert_synthetic_observations,
     _make_fact_callback,
     _RRFReranker,
     _wait_for_operation,
@@ -402,12 +403,151 @@ async def run_recall_suite(scale_cfg: dict[str, int]) -> SuiteResult:
 
 
 # ---------------------------------------------------------------------------
+# Suite: recall-with-observations
+# ---------------------------------------------------------------------------
+
+
+async def run_recall_with_observations_suite(scale_cfg: dict[str, int]) -> SuiteResult:
+    """Measure recall latency/throughput with pre-populated bank including synthetic observations."""
+    from hindsight_api.engine.memory_engine import Budget
+    from hindsight_api.models import RequestContext
+
+    bank_size = scale_cfg["recall_bank_size"]
+    iterations = scale_cfg["recall_iterations"]
+    concurrency = scale_cfg["recall_concurrency"]
+    bank_id = f"perf-recall-obs-{uuid.uuid4().hex[:8]}"
+
+    console.print(
+        f"\n[bold cyan]Suite: recall-with-observations[/bold cyan]  "
+        f"bank_size={bank_size}  iterations={iterations}  concurrency={concurrency}  bank={bank_id}"
+    )
+
+    engine = _build_engine()
+    await engine.initialize()
+
+    # Use RRF reranker to isolate DB performance from cross-encoder CPU cost
+    engine._cross_encoder_reranker = _RRFReranker()
+
+    # Populate bank with facts then insert synthetic observations (1 per fact)
+    await _populate_bank(engine, bank_id, bank_size)
+
+    pool = await engine._get_pool()
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        progress.add_task("Inserting synthetic observations…")
+        n_obs = await _insert_synthetic_observations(pool, bank_id)
+    console.print(f"  Inserted {n_obs:,} observations")
+
+    request_context = RequestContext()
+    durations: list[float] = []
+    all_phase_timings: dict[str, list[float]] = {}
+
+    async def recall_one(query: str) -> float:
+        t0 = time.perf_counter()
+        result = await engine.recall_async(
+            bank_id=bank_id,
+            query=query,
+            budget=Budget.HIGH,
+            max_tokens=4096,
+            enable_trace=True,
+            request_context=request_context,
+            _quiet=True,
+        )
+        elapsed = time.perf_counter() - t0
+        if result.trace:
+            summary = result.trace.get("summary", {})
+            for pm in summary.get("phase_metrics", []):
+                all_phase_timings.setdefault(pm["phase_name"], []).append(pm["duration_seconds"])
+        return elapsed
+
+    # Run recall iterations in parallel batches
+    remaining = iterations
+    query_idx = 0
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Running recall (with observations)…", total=iterations)
+        while remaining > 0:
+            batch_size = min(concurrency, remaining)
+            queries = [RECALL_QUERIES[(query_idx + i) % len(RECALL_QUERIES)] for i in range(batch_size)]
+            query_idx += batch_size
+            batch = await asyncio.gather(*[recall_one(q) for q in queries])
+            durations.extend(batch)
+            remaining -= batch_size
+            progress.advance(task, batch_size)
+
+    suite_duration = sum(durations)
+    throughput = iterations / (suite_duration / concurrency) if suite_duration > 0 else 0
+
+    await engine.delete_bank(bank_id=bank_id, request_context=RequestContext())
+    await engine.close()
+
+    latency_stats = PercentileStats.from_samples(durations)
+    phase_stats = {name: PercentileStats.from_samples(times) for name, times in all_phase_timings.items()}
+
+    recall_result = RecallResult(
+        bank_size=bank_size,
+        concurrency=concurrency,
+        latency=latency_stats,
+        throughput_queries_per_sec=round(throughput, 2),
+        phase_timings=phase_stats,
+    )
+
+    # Print summary
+    table = Table(title="Recall Latency (with observations)")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green", justify="right")
+    table.add_row("Bank size (facts)", f"{bank_size:,}")
+    table.add_row("Observations", f"{n_obs:,}")
+    table.add_row("Iterations", str(iterations))
+    table.add_row("Concurrency", str(concurrency))
+    table.add_row("Throughput", f"{throughput:.2f} queries/s")
+    table.add_row("Mean", f"{latency_stats.mean:.3f}s")
+    table.add_row("p50", f"{latency_stats.p50:.3f}s")
+    table.add_row("p95", f"{latency_stats.p95:.3f}s")
+    table.add_row("p99", f"{latency_stats.p99:.3f}s")
+    table.add_row("Min", f"{latency_stats.min:.3f}s")
+    table.add_row("Max", f"{latency_stats.max:.3f}s")
+    console.print(table)
+
+    if phase_stats:
+        phase_table = Table(title="Per-Step Timing Breakdown (with observations)")
+        phase_table.add_column("Step", style="cyan")
+        phase_table.add_column("Mean", style="green", justify="right")
+        phase_table.add_column("p50", style="green", justify="right")
+        phase_table.add_column("p95", style="yellow", justify="right")
+        phase_table.add_column("Max", style="red", justify="right")
+
+        sorted_phases = sorted(phase_stats.items(), key=lambda x: x[1].mean, reverse=True)
+        for name, ps in sorted_phases:
+            phase_table.add_row(name, f"{ps.mean:.3f}s", f"{ps.p50:.3f}s", f"{ps.p95:.3f}s", f"{ps.max:.3f}s")
+        console.print(phase_table)
+
+    return SuiteResult(
+        name="recall-with-observations",
+        duration_seconds=round(suite_duration, 3),
+        success=True,
+        recall=recall_result,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registry and orchestrator
 # ---------------------------------------------------------------------------
 
 SUITES = {
     "retain": run_retain_suite,
     "recall": run_recall_suite,
+    "recall-with-observations": run_recall_with_observations_suite,
 }
 
 
