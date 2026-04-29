@@ -20,9 +20,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 from alembic import context
 from dotenv import load_dotenv
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import Connection, engine_from_config, pool
+from sqlalchemy.engine import Engine
 
-from hindsight_api.db_url import to_libpq_url
+from hindsight_api.db_url import is_oracle_url, to_libpq_url
 from hindsight_api.models import Base
 
 
@@ -44,12 +45,6 @@ config = context.config
 target_metadata = Base.metadata
 
 
-def _is_oracle_url(url: str) -> bool:
-    if not url or "://" not in url:
-        return False
-    return urlsplit(url).scheme.startswith("oracle")
-
-
 def _normalize_oracle_url(url: str) -> str:
     """Force the ``oracle+oracledb`` driver — the default would pick cx_Oracle."""
     parts = urlsplit(url)
@@ -69,7 +64,7 @@ def get_database_url() -> str:
                 "Set HINDSIGHT_API_DATABASE_URL environment variable or pass database_url to run_migrations()."
             )
 
-    if _is_oracle_url(database_url):
+    if is_oracle_url(database_url):
         database_url = _normalize_oracle_url(database_url)
     else:
         # PG: convert SQLAlchemy-style asyncpg URLs and ?ssl= params to libpq form
@@ -95,11 +90,11 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-def _configure_pg_session(connectable, connection, target_schema: str | None) -> None:
+def _configure_pg_session(engine: Engine, connection: Connection, target_schema: str | None) -> None:
     """PG-only: ensure the session is RW (Supabase) and bind ``search_path``."""
     from sqlalchemy import event, text
 
-    @event.listens_for(connectable, "connect")
+    @event.listens_for(engine, "connect")
     def set_read_write_mode(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
         cursor.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE")
@@ -115,7 +110,7 @@ def _configure_pg_session(connectable, connection, target_schema: str | None) ->
     connection.commit()
 
 
-def _configure_oracle_session(connection, target_schema: str | None) -> None:
+def _configure_oracle_session(connection: Connection, target_schema: str | None) -> None:
     """Oracle: switch the session's default schema; tolerate DDL contention."""
     from sqlalchemy import text
 
@@ -128,7 +123,7 @@ def _configure_oracle_session(connection, target_schema: str | None) -> None:
 def run_migrations_online() -> None:
     database_url = get_database_url()
     target_schema = config.get_main_option("target_schema")
-    is_oracle = _is_oracle_url(database_url)
+    is_oracle = is_oracle_url(database_url)
 
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),

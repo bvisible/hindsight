@@ -423,8 +423,10 @@ def _oracle_upgrade() -> None:
     for idx in _INDEXES:
         _execute_ignoring_955(idx)
 
-    # Vector and text indexes are best-effort: VECTOR requires Oracle 23ai +
-    # ASSM tablespace; CTXSYS may not be available on every install.
+    # Hindsight on Oracle requires 23ai with VECTOR support (ASSM tablespace)
+    # and the CTXSYS package for full-text. Both index creations must succeed
+    # — the migration fails hard if either feature is unavailable, by design.
+    # We only swallow ORA-00955 (object already exists) so reruns are safe.
     _execute_ignoring_955(_VECTOR_INDEX)
     bind.exec_driver_sql(_TEXT_INDEX)
 

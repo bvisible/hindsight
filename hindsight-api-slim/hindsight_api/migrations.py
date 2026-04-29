@@ -21,14 +21,13 @@ import os
 import threading
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from alembic import command
 from alembic.config import Config
 from alembic.script.revision import ResolutionError
 from sqlalchemy import Connection, create_engine, text
 
-from .db_url import to_libpq_url
+from .db_url import is_oracle_url, to_libpq_url
 from .utils import mask_network_location
 
 logger = logging.getLogger(__name__)
@@ -105,17 +104,6 @@ def _detect_vector_extension(conn, vector_extension: str = "pgvector") -> str:
         raise ValueError(
             f"Invalid vector_extension: {vector_extension}. Must be 'pgvector', 'vchord', or 'pgvectorscale'"
         )
-
-
-def _is_oracle_url(url: str) -> bool:
-    """True if ``url`` is an Oracle SQLAlchemy URL.
-
-    Oracle migrations skip the PG-specific advisory-lock dance and pgvector
-    setup; env.py handles the dialect-specific session config.
-    """
-    if not url or "://" not in url:
-        return False
-    return urlsplit(url).scheme.startswith("oracle")
 
 
 def _get_schema_lock_id(schema: str) -> int:
@@ -234,7 +222,9 @@ def run_migrations(
     # HINDSIGHT_API_MIGRATION_DATABASE_URL to the direct PostgreSQL endpoint
     # (e.g. hindsight-pg-rw) to restore correct locking behaviour.
     raw_url = migration_database_url or database_url
-    migration_url = raw_url if _is_oracle_url(raw_url) else to_libpq_url(raw_url)
+    # Oracle URLs are passed through to SQLAlchemy unchanged; only PG URLs
+    # need the libpq normalization (asyncpg → psycopg2 driver, ssl → sslmode).
+    migration_url = raw_url if is_oracle_url(raw_url) else to_libpq_url(raw_url)
 
     try:
         # Determine script location
@@ -254,7 +244,7 @@ def run_migrations(
         # Oracle path: no advisory lock, no pgvector. DDL is autocommit on
         # Oracle, ``IF NOT EXISTS`` (Oracle 23ai) and 955 swallowing make
         # repeated runs from concurrent workers safe.
-        if _is_oracle_url(migration_url):
+        if is_oracle_url(migration_url):
             _run_migrations_internal(migration_url, script_location, schema=schema)
             return
 
