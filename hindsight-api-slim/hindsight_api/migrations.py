@@ -21,6 +21,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from alembic import command
 from alembic.config import Config
@@ -104,6 +105,17 @@ def _detect_vector_extension(conn, vector_extension: str = "pgvector") -> str:
         raise ValueError(
             f"Invalid vector_extension: {vector_extension}. Must be 'pgvector', 'vchord', or 'pgvectorscale'"
         )
+
+
+def _is_oracle_url(url: str) -> bool:
+    """True if ``url`` is an Oracle SQLAlchemy URL.
+
+    Oracle migrations skip the PG-specific advisory-lock dance and pgvector
+    setup; env.py handles the dialect-specific session config.
+    """
+    if not url or "://" not in url:
+        return False
+    return urlsplit(url).scheme.startswith("oracle")
 
 
 def _get_schema_lock_id(schema: str) -> int:
@@ -221,7 +233,8 @@ def run_migrations(
     # ineffective when the app URL goes through a pooler.  Configure
     # HINDSIGHT_API_MIGRATION_DATABASE_URL to the direct PostgreSQL endpoint
     # (e.g. hindsight-pg-rw) to restore correct locking behaviour.
-    migration_url = to_libpq_url(migration_database_url or database_url)
+    raw_url = migration_database_url or database_url
+    migration_url = raw_url if _is_oracle_url(raw_url) else to_libpq_url(raw_url)
 
     try:
         # Determine script location
@@ -237,6 +250,13 @@ def run_migrations(
             raise FileNotFoundError(
                 f"Alembic script location not found at {script_location}. Database migrations cannot be run."
             )
+
+        # Oracle path: no advisory lock, no pgvector. DDL is autocommit on
+        # Oracle, ``IF NOT EXISTS`` (Oracle 23ai) and 955 swallowing make
+        # repeated runs from concurrent workers safe.
+        if _is_oracle_url(migration_url):
+            _run_migrations_internal(migration_url, script_location, schema=schema)
+            return
 
         # Use schema-specific lock ID for multi-tenant isolation
         lock_id = _get_schema_lock_id(schema) if schema else MIGRATION_LOCK_ID
