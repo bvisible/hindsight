@@ -196,8 +196,43 @@ export TMPDIR=$tmpDir
 # Run bootstrap with postgres --boot
 # This reads postgres.bki from stdin and creates the system catalog
 export PATH=$pgBinDir/wrappers:${'$'}PATH
-$nativeDir/libpostgres.so --boot -X 1048576 -F -c dynamic_shared_memory_type=mmap -D $dataDir < $baseDir/share/postgresql/postgres.bki 2>&1
-BOOT_EXIT=${'$'}?
+# Log first and last lines of bki to verify file is readable
+echo "BKI_LINES=$(wc -l < $baseDir/share/postgresql/postgres.bki)"
+head -3 $baseDir/share/postgresql/postgres.bki
+
+# Run boot with timeout and capture output to file
+$nativeDir/libpostgres.so --boot -X 1048576 -F -c dynamic_shared_memory_type=mmap -D $dataDir < $baseDir/share/postgresql/postgres.bki > $baseDir/boot_out.log 2>&1 &
+BOOT_PID=${'$'}!
+echo "BOOT_PID=${'$'}BOOT_PID"
+
+# Monitor for 120 seconds, checking progress every 10s
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    sleep 10
+    if ! kill -0 ${'$'}BOOT_PID 2>/dev/null; then
+        wait ${'$'}BOOT_PID
+        BOOT_EXIT=${'$'}?
+        echo "BOOT_COMPLETED after ${'$'}((i*10))s exit=${'$'}BOOT_EXIT"
+        break
+    fi
+    LINES=$(wc -l < $baseDir/boot_out.log 2>/dev/null || echo 0)
+    SIZE=$(wc -c < $baseDir/boot_out.log 2>/dev/null || echo 0)
+    echo "BOOT_PROGRESS ${i}0s: ${LINES} lines, ${SIZE} bytes"
+    tail -1 $baseDir/boot_out.log 2>/dev/null
+done
+
+# If still running after 120s, show what we have and kill
+if kill -0 ${'$'}BOOT_PID 2>/dev/null; then
+    echo "BOOT_STILL_RUNNING after 120s"
+    echo "Last 5 lines:"
+    tail -5 $baseDir/boot_out.log 2>/dev/null
+    kill ${'$'}BOOT_PID 2>/dev/null
+    BOOT_EXIT=1
+else
+    BOOT_EXIT=${'$'}?
+fi
+
+# Show global dir contents
+ls -la $dataDir/global/ 2>/dev/null | head -10
 echo "BOOT_EXIT=${'$'}BOOT_EXIT"
 
 if [ ${'$'}BOOT_EXIT -eq 0 ]; then
@@ -219,7 +254,7 @@ fi
 """)
         bootScript.setExecutable(true, false)
 
-        val bootResult = exec("/system/bin/sh", bootScript.absolutePath, env = pgEnvMap, timeoutMs = 2700_000)
+        val bootResult = exec("/system/bin/sh", bootScript.absolutePath, env = pgEnvMap, timeoutMs = 180_000)
         Log.i(TAG, "Boot result (${bootResult.length} chars): ${bootResult.takeLast(500)}")
 
         val pgControlExists = File("$dataDir/global/pg_control").exists()
