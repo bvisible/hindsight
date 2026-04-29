@@ -8,13 +8,32 @@
  *   bank-template.json   — optional: bank config + mental models + directives
  *   content/             — optional: reference docs to ingest (.md, .txt, etc.)
  *
- * The CLI copies files to the agent workspace. The harness plugin handles
- * bank creation, template import, and content ingestion on first session.
+ * The CLI:
+ *   1. Ensures the Hindsight plugin is installed and configured
+ *   2. Copies template + content to the agent workspace
+ *   3. Creates the harness agent and installs the skill
+ *   4. Plugin bootstraps template + content on first session
  */
 
 import { readFileSync, writeFileSync, copyFileSync, mkdirSync, existsSync, readdirSync } from "fs";
 import { join, resolve, extname, basename } from "path";
 import { homedir } from "os";
+import { execSync } from "child_process";
+import { createInterface } from "readline";
+
+// ── Interactive prompts ─────────────────────────────────
+
+function prompt(question: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  return new Promise((res) => {
+    rl.question(question, (answer) => { rl.close(); res(answer.trim()); });
+  });
+}
+
+async function confirm(question: string): Promise<boolean> {
+  const answer = await prompt(`${question} (y/n) `);
+  return answer.toLowerCase() === "y" || answer.toLowerCase() === "yes";
+}
 
 // ── Skill ───────────────────────────────────────────────
 
@@ -60,6 +79,92 @@ Examples:
 - Create pages silently
 - Prefer fewer broad pages over many narrow ones
 `;
+
+// ── Hindsight plugin management ─────────────────────────
+
+function isPluginInstalled(harness: string): boolean {
+  if (harness !== "openclaw") return false;
+  try {
+    const configPath = join(homedir(), ".openclaw", "openclaw.json");
+    if (!existsSync(configPath)) return false;
+    const config = JSON.parse(readFileSync(configPath, "utf-8"));
+    const plugin = config.plugins?.entries?.["hindsight-openclaw"];
+    return plugin?.enabled !== false && plugin !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+function isPluginConfigured(harness: string): boolean {
+  if (harness !== "openclaw") return false;
+  try {
+    const configPath = join(homedir(), ".openclaw", "openclaw.json");
+    const config = JSON.parse(readFileSync(configPath, "utf-8"));
+    const pc = config.plugins?.entries?.["hindsight-openclaw"]?.config || {};
+    // Configured if it has an API URL, or embed version, or LLM provider set
+    return !!(pc.hindsightApiUrl || pc.embedVersion || pc.llmProvider);
+  } catch {
+    return false;
+  }
+}
+
+function getPluginSummary(): string {
+  try {
+    const configPath = join(homedir(), ".openclaw", "openclaw.json");
+    const config = JSON.parse(readFileSync(configPath, "utf-8"));
+    const pc = config.plugins?.entries?.["hindsight-openclaw"]?.config || {};
+    if (pc.hindsightApiUrl) {
+      return `External API: ${pc.hindsightApiUrl}`;
+    } else if (pc.embedVersion) {
+      return `Embedded daemon v${pc.embedVersion}`;
+    } else {
+      return "Not configured";
+    }
+  } catch {
+    return "Unknown";
+  }
+}
+
+async function ensurePlugin(harness: string): Promise<void> {
+  if (harness !== "openclaw") return;
+
+  if (!isPluginInstalled(harness)) {
+    console.log("Hindsight plugin not found. Installing...\n");
+    try {
+      execSync("openclaw plugins install @vectorize-io/hindsight-openclaw", { stdio: "inherit" });
+      console.log();
+    } catch {
+      console.error("Failed to install plugin. Install manually:");
+      console.error("  openclaw plugins install @vectorize-io/hindsight-openclaw");
+      process.exit(1);
+    }
+  }
+
+  if (!isPluginConfigured(harness)) {
+    console.log("Hindsight plugin needs configuration.\n");
+    console.log("Running the setup wizard...\n");
+    try {
+      execSync("npx --package @vectorize-io/hindsight-openclaw hindsight-openclaw-setup", { stdio: "inherit" });
+      console.log();
+    } catch {
+      console.error("Setup wizard failed. Run manually:");
+      console.error("  npx --package @vectorize-io/hindsight-openclaw hindsight-openclaw-setup");
+      process.exit(1);
+    }
+  } else {
+    const summary = getPluginSummary();
+    console.log(`Hindsight plugin: ${summary}`);
+    if (process.stdin.isTTY) {
+      const ok = await confirm("Continue with this configuration?");
+      if (!ok) {
+        console.log("\nRun the setup wizard to reconfigure:");
+        console.log("  npx --package @vectorize-io/hindsight-openclaw hindsight-openclaw-setup");
+        process.exit(0);
+      }
+    }
+    console.log();
+  }
+}
 
 // ── Main ────────────────────────────────────────────────
 
@@ -107,6 +212,9 @@ Options:
 
   const agentId = agentName || basename(dir);
 
+  // Step 1: Ensure Hindsight plugin is installed and configured
+  await ensurePlugin(harness);
+
   // Resolve workspace
   let workspaceDir: string;
   switch (harness) {
@@ -120,7 +228,7 @@ Options:
       workspaceDir = join(homedir(), ".claude");
       break;
     default:
-      console.error(`Unknown harness: ${harness}. Supported: openclaw, hermes, claude-code`);
+      console.error(`Unknown harness: ${harness}`);
       process.exit(1);
   }
 
@@ -131,38 +239,37 @@ Options:
 
   mkdirSync(workspaceDir, { recursive: true });
 
-  // Copy bank-template.json if exists
+  // Step 2: Copy bank-template.json
   const templateSrc = join(dir, "bank-template.json");
-  const templateDst = join(workspaceDir, ".hindsight", "bank-template.json");
+  const hindsightDir = join(workspaceDir, ".hindsight");
   if (existsSync(templateSrc)) {
-    mkdirSync(join(workspaceDir, ".hindsight"), { recursive: true });
-    copyFileSync(templateSrc, templateDst);
+    mkdirSync(hindsightDir, { recursive: true });
+    copyFileSync(templateSrc, join(hindsightDir, "bank-template.json"));
     console.log("Copied bank-template.json");
   }
 
-  // Copy content/ if exists
+  // Step 3: Copy content/
   const contentSrc = join(dir, "content");
   if (existsSync(contentSrc)) {
-    const contentDst = join(workspaceDir, ".hindsight", "content");
+    const contentDst = join(hindsightDir, "content");
     mkdirSync(contentDst, { recursive: true });
     const exts = new Set([".md", ".txt", ".html", ".json", ".csv", ".xml"]);
     const files = readdirSync(contentSrc).filter((f) => exts.has(extname(f).toLowerCase()));
     for (const file of files) {
       copyFileSync(join(contentSrc, file), join(contentDst, file));
     }
-    console.log(`Copied ${files.length} content file(s)`);
+    if (files.length > 0) console.log(`Copied ${files.length} content file(s)`);
   }
 
-  // Install skill
+  // Step 4: Install skill
   const skillDir = join(workspaceDir, "skills", "agent-knowledge");
   mkdirSync(skillDir, { recursive: true });
   writeFileSync(join(skillDir, "SKILL.md"), SKILL_MD);
   console.log("Skill installed.");
 
-  // Create harness agent
+  // Step 5: Create harness agent
   if (harness === "openclaw") {
     try {
-      const { execSync } = await import("child_process");
       const listOut = execSync("openclaw agents list --json 2>/dev/null", { encoding: "utf-8" });
       const agents = JSON.parse(listOut).agents || [];
       if (!agents.some((a: any) => a.name === agentId)) {
@@ -172,29 +279,18 @@ Options:
         console.log(`Agent '${agentId}' already exists.`);
       }
     } catch {
-      console.log(`Note: create agent manually: openclaw agents add ${agentId} --workspace ${workspaceDir} --non-interactive`);
+      console.log(`Note: create agent manually:\n  openclaw agents add ${agentId} --workspace ${workspaceDir} --non-interactive`);
     }
   }
 
-  // Patch startup file
-  const startupFile = harness === "openclaw"
-    ? join(workspaceDir, "AGENTS.md")
-    : harness === "hermes"
-      ? (agentId === "default" ? join(workspaceDir, "SOUL.md") : join(homedir(), ".hermes", "profiles", agentId, "SOUL.md"))
-      : undefined;
-
-  const startupPatch = harness === "openclaw"
-    ? '5. Read `skills/agent-knowledge/SKILL.md` and **execute its mandatory startup sequence**'
-    : "## Mandatory: Agent Knowledge\n\nAt session start, load the `agent-knowledge` skill and execute its startup sequence.";
+  // Step 6: Patch startup file
+  const startupFile = harness === "openclaw" ? join(workspaceDir, "AGENTS.md") : undefined;
+  const startupPatch = '5. Read `skills/agent-knowledge/SKILL.md` and **execute its mandatory startup sequence**';
 
   if (startupFile && existsSync(startupFile)) {
     let text = readFileSync(startupFile, "utf-8");
     if (!text.includes("agent-knowledge")) {
-      if (text.includes("Don't ask permission.")) {
-        text = text.replace("Don't ask permission. Just do it.", `${startupPatch}\n\nDon't ask permission. Just do it.`);
-      } else {
-        text += `\n\n${startupPatch}\n`;
-      }
+      text = text.replace("Don't ask permission. Just do it.", `${startupPatch}\n\nDon't ask permission. Just do it.`);
       writeFileSync(startupFile, text);
       console.log("Startup patched.");
     }
@@ -202,9 +298,14 @@ Options:
 
   console.log();
   console.log(`'${agentId}' installed.`);
-  console.log("The plugin will import the template and content on first session.");
-  if (harness === "openclaw") console.log("  Restart gateway: openclaw gateway restart");
-  if (harness === "hermes") console.log(`  Chat: hermes${agentId !== "default" ? ` --profile ${agentId}` : ""}`);
+  console.log();
+  console.log("Next steps:");
+  if (harness === "openclaw") {
+    console.log("  1. openclaw gateway restart");
+    console.log(`  2. openclaw tui --session agent:${agentId}:main:session1`);
+    console.log();
+    console.log("The first session will import the template and content automatically.");
+  }
 }
 
 main().catch((err) => {
