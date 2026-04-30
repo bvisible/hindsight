@@ -166,48 +166,30 @@ export class HindsightClient {
       tags?: string[];
       /** How to handle existing documents: 'replace' (default) or 'append' */
       updateMode?: "replace" | "append";
+      /** Observation scoping strategy: 'per_tag', 'combined', 'all_combinations', or explicit scope groups */
+      observationScopes?: "per_tag" | "combined" | "all_combinations" | string[][];
+      /** Extraction strategy override */
+      strategy?: string;
     }
   ): Promise<RetainResponse> {
-    const item: {
-      content: string;
-      timestamp?: string;
-      context?: string;
-      metadata?: Record<string, string>;
-      document_id?: string;
-      entities?: EntityInput[];
-      tags?: string[];
-      update_mode?: "replace" | "append";
-    } = { content };
-    if (options?.timestamp) {
-      item.timestamp =
-        options.timestamp instanceof Date ? options.timestamp.toISOString() : options.timestamp;
-    }
-    if (options?.context) {
-      item.context = options.context;
-    }
-    if (options?.metadata) {
-      item.metadata = options.metadata;
-    }
-    if (options?.documentId) {
-      item.document_id = options.documentId;
-    }
-    if (options?.entities) {
-      item.entities = options.entities;
-    }
-    if (options?.tags) {
-      item.tags = options.tags;
-    }
-    if (options?.updateMode) {
-      item.update_mode = options.updateMode;
-    }
-
-    const response = await sdk.retainMemories({
-      client: this.client,
-      path: { bank_id: bankId },
-      body: { items: [item], async: options?.async },
-    });
-
-    return this.validateResponse(response, "retain");
+    return this.retainBatch(
+      bankId,
+      [
+        {
+          content,
+          timestamp: options?.timestamp,
+          context: options?.context,
+          metadata: options?.metadata,
+          document_id: options?.documentId,
+          entities: options?.entities,
+          tags: options?.tags,
+          update_mode: options?.updateMode,
+          observation_scopes: options?.observationScopes,
+          strategy: options?.strategy,
+        },
+      ],
+      { async: options?.async }
+    );
   }
 
   /**
