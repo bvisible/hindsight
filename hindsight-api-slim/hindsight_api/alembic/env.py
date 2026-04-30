@@ -16,7 +16,7 @@ so a single revision tree serves both backends.
 import logging
 import os
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from alembic import context
 from dotenv import load_dotenv
@@ -46,11 +46,36 @@ target_metadata = Base.metadata
 
 
 def _normalize_oracle_url(url: str) -> str:
-    """Force the ``oracle+oracledb`` driver — the default would pick cx_Oracle."""
+    """Coerce an Oracle URL into the SQLAlchemy form the oracledb dialect expects.
+
+    Two issues to handle:
+
+    1. Force the ``oracle+oracledb`` driver — bare ``oracle://`` defaults to
+       cx_Oracle.
+    2. Map a path-style service to ``?service_name=...``. SQLAlchemy's oracledb
+       dialect treats the URL path as a *SID* (legacy), but Oracle Free /
+       Autonomous DB only register a service name. Without this rewrite we get
+       ``DPY-6003: SID "FREEPDB1" is not registered`` even though the listener
+       is happy to accept the same name as a service.
+    """
     parts = urlsplit(url)
-    if parts.scheme == "oracle":
-        return urlunsplit(("oracle+oracledb", parts.netloc, parts.path, parts.query, parts.fragment))
-    return url
+    if not parts.scheme.startswith("oracle"):
+        return url
+
+    new_scheme = "oracle+oracledb" if parts.scheme == "oracle" else parts.scheme
+    service = parts.path.lstrip("/")
+    new_query = parts.query
+    new_path = parts.path
+
+    # Promote /SERVICE to ?service_name=SERVICE unless the caller already
+    # supplied an explicit ?sid= or ?service_name=.
+    if service and "service_name=" not in new_query and "sid=" not in new_query:
+        params = [(k, v) for k, v in parse_qsl(new_query, keep_blank_values=True)]
+        params.append(("service_name", service))
+        new_query = urlencode(params)
+        new_path = ""
+
+    return urlunsplit((new_scheme, parts.netloc, new_path, new_query, parts.fragment))
 
 
 def get_database_url() -> str:
