@@ -326,6 +326,44 @@ async function ensurePlugin(): Promise<void> {
 
 // ── NemoClaw plugin management ─────────────────────────
 
+function listNemoClawSandboxes(): string[] {
+  try {
+    const out = execSync("nemoclaw list", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
+    return out
+      .split("\n")
+      .filter((l) => /^\s{4}\S/.test(l) && !l.includes("model:") && !l.includes("dashboard:"))
+      .map((l) => l.trim().replace(/\s*\*$/, ""));
+  } catch {
+    return [];
+  }
+}
+
+async function detectNemoClawSandbox(): Promise<string> {
+  const sandboxes = listNemoClawSandboxes();
+
+  if (sandboxes.length === 0) {
+    p.cancel("No NemoClaw sandboxes found. Create one with: nemoclaw onboard");
+    process.exit(1);
+  }
+
+  if (sandboxes.length === 1) {
+    p.log.info(`Using sandbox: ${color.cyan(sandboxes[0])}`);
+    return sandboxes[0];
+  }
+
+  const selected = await p.select({
+    message: "Select a NemoClaw sandbox:",
+    options: sandboxes.map((s) => ({ value: s, label: s })),
+  });
+
+  if (p.isCancel(selected)) {
+    p.cancel("Cancelled.");
+    process.exit(0);
+  }
+
+  return selected as string;
+}
+
 async function ensureNemoClawPlugin(sandboxName: string, agentId: string): Promise<void> {
   // Check nemoclaw is installed
   try {
@@ -388,7 +426,7 @@ async function main() {
   ${color.dim("Options:")}
     ${color.cyan("--harness <h>")}      Required. openclaw | nemoclaw
     ${color.cyan("--agent <name>")}     Agent name (defaults to directory name)
-    ${color.cyan("--sandbox <name>")}   NemoClaw sandbox name (required for nemoclaw harness)
+    ${color.cyan("--sandbox <name>")}   NemoClaw sandbox (auto-detected if only one exists)
 `);
     process.exit(0);
   }
@@ -417,8 +455,7 @@ async function main() {
   }
 
   if (harness === "nemoclaw" && !sandbox) {
-    p.cancel("--sandbox required for nemoclaw harness");
-    process.exit(1);
+    sandbox = await detectNemoClawSandbox();
   }
 
   p.intro(color.bgCyan(color.black(` self-driving-agents `)));
