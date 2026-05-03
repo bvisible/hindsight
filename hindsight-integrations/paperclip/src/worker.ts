@@ -20,7 +20,7 @@ import { deriveBankId } from "./bank.js";
 interface PluginConfig {
   hindsightApiUrl: string;
   hindsightApiKeyRef?: string;
-  bankGranularity?: Array<"company" | "agent">;
+  bankGranularity?: Array<"company" | "agent" | "user">;
   recallBudget?: "low" | "mid" | "high";
   autoRetain?: boolean;
 }
@@ -54,6 +54,61 @@ async function resolveApiKey(
   return resolved ?? undefined;
 }
 
+/**
+ * NORA fork — resolve the user identity for the active run, by looking up the
+ * agent's currently checked-out issue and parsing its `originId`.
+ *
+ * Convention used by upstream creators (e.g. paperclip-plugin-whatsapp):
+ *   originId = "<channel-key>::<user-email>"
+ *      ex.    "+41798279951::jeremy@neoffice.io"
+ *
+ * Returns the email when present, otherwise undefined (callers fall back to
+ * a non-user-scoped bank).
+ *
+ * Skipped entirely when `bankGranularity` does not include "user" — saves a
+ * round-trip to the host when user scoping is disabled.
+ */
+async function resolveUserIdFromActiveIssue(
+  ctx: {
+    issues: {
+      list(input: {
+        companyId: string;
+        assigneeAgentId?: string;
+        status?: string;
+        limit?: number;
+      }): Promise<Array<{ originId?: string | null }>>;
+    };
+    logger: { warn(msg: string, meta?: Record<string, unknown>): void };
+  },
+  config: PluginConfig,
+  companyId: string,
+  agentId: string,
+): Promise<string | undefined> {
+  if (!config.bankGranularity?.includes("user")) return undefined;
+
+  try {
+    const issues = await ctx.issues.list({
+      companyId,
+      assigneeAgentId: agentId,
+      status: "in-progress",
+      limit: 1,
+    });
+    const originId = issues[0]?.originId ?? "";
+    if (!originId.includes("::")) return undefined;
+    const parts = originId.split("::");
+    // Take the last segment that looks like an email — robust against
+    // additional `::` separators in the channel key.
+    const email = [...parts].reverse().find((segment) => segment.includes("@"));
+    return email && email.includes("@") ? email : undefined;
+  } catch (err) {
+    ctx.logger.warn("Could not resolve user from active issue", {
+      agentId,
+      error: String(err),
+    });
+    return undefined;
+  }
+}
+
 const plugin = definePlugin({
   async setup(ctx) {
     ctx.logger.info("Hindsight memory plugin starting");
@@ -73,7 +128,8 @@ const plugin = definePlugin({
       try {
         const apiKey = await resolveApiKey(ctx, config);
         const client = new HindsightClient(config.hindsightApiUrl, apiKey);
-        const bankId = deriveBankId({ companyId, agentId }, config);
+        const userId = await resolveUserIdFromActiveIssue(ctx, config, companyId, agentId);
+        const bankId = deriveBankId({ companyId, agentId, userId }, config);
 
         const response = await client.recall(bankId, query, config.recallBudget ?? "mid");
 
@@ -116,7 +172,8 @@ const plugin = definePlugin({
       try {
         const apiKey = await resolveApiKey(ctx, config);
         const client = new HindsightClient(config.hindsightApiUrl, apiKey);
-        const bankId = deriveBankId({ companyId, agentId }, config);
+        const userId = await resolveUserIdFromActiveIssue(ctx, config, companyId, agentId);
+        const bankId = deriveBankId({ companyId, agentId, userId }, config);
 
         await client.retain(bankId, content, runId, { agentId, companyId, runId });
         ctx.logger.info("Retained run output to memory", { runId, bankId });
@@ -147,8 +204,14 @@ const plugin = definePlugin({
       async (params: unknown, runCtx: ToolRunContext) => {
         const { query } = params as { query: string };
         const config = await getConfig(ctx);
+        const userId = await resolveUserIdFromActiveIssue(
+          ctx,
+          config,
+          runCtx.companyId,
+          runCtx.agentId,
+        );
         const bankId = deriveBankId(
-          { companyId: runCtx.companyId, agentId: runCtx.agentId },
+          { companyId: runCtx.companyId, agentId: runCtx.agentId, userId },
           config
         );
 
@@ -198,8 +261,14 @@ const plugin = definePlugin({
       async (params: unknown, runCtx: ToolRunContext) => {
         const { content } = params as { content: string };
         const config = await getConfig(ctx);
+        const userId = await resolveUserIdFromActiveIssue(
+          ctx,
+          config,
+          runCtx.companyId,
+          runCtx.agentId,
+        );
         const bankId = deriveBankId(
-          { companyId: runCtx.companyId, agentId: runCtx.agentId },
+          { companyId: runCtx.companyId, agentId: runCtx.agentId, userId },
           config
         );
 

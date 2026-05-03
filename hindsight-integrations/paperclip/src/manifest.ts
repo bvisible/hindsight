@@ -17,6 +17,10 @@ const manifest: PaperclipPluginManifestV1 = {
     "http.outbound",
     "secrets.read-ref",
     "agents.read",
+    // NORA fork — needed to look up the active issue and parse user identity
+    // from its `originId` (format `<phone>::<email>`) when `bankGranularity`
+    // includes `"user"`.
+    "issues.read",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
@@ -42,8 +46,10 @@ const manifest: PaperclipPluginManifestV1 = {
         type: "array",
         title: "Bank Granularity",
         description:
-          "Controls memory isolation. Default ['company', 'agent'] gives each agent its own bank per company.",
-        items: { type: "string", enum: ["company", "agent"] },
+          "Controls memory isolation. Default ['company','agent'] = each agent has its own bank shared by all users of the company. " +
+          "Add 'user' (e.g. ['company','agent','user']) to scope memories per Frappe user — required when the same agent serves multiple human users (RGPD multi-user privacy). " +
+          "User scoping requires the upstream issue's `originId` to be set in the format `<key>::<email>` (NORA WhatsApp plugin convention).",
+        items: { type: "string", enum: ["company", "agent", "user"] },
         default: ["company", "agent"],
       },
       recallBudget: {
