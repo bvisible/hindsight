@@ -76,7 +76,13 @@ const manifest: PaperclipPluginManifestV1 = {
       name: "hindsight_recall",
       displayName: "Recall from Memory",
       description:
-        "Search Hindsight long-term memory for context relevant to a query. Use this before starting a task to surface relevant past decisions, preferences, and knowledge.",
+        "Search Hindsight long-term memory for context relevant to a query. " +
+        "Use this before starting a task to surface relevant past decisions, " +
+        "preferences, and knowledge. The optional `bank` parameter targets a " +
+        "curated sub-bank — use 'tenant' for the local tenant knowledge " +
+        "(plan comptable, customers, items), 'ch' for the Swiss accounting " +
+        "RAG, 'collective' for cross-tenant validated claims. Omit to search " +
+        "the agent's default instance memory.",
       parametersSchema: {
         type: "object",
         required: ["query"],
@@ -84,6 +90,14 @@ const manifest: PaperclipPluginManifestV1 = {
           query: {
             type: "string",
             description: "What to search for in memory",
+          },
+          bank: {
+            type: "string",
+            enum: ["tenant", "ch", "collective"],
+            description:
+              "Optional sub-bank slot. 'tenant' = local tenant knowledge (#35), " +
+              "'ch' = Swiss accounting RAG, 'collective' = cross-tenant claims. " +
+              "Omit for default agent instance memory.",
           },
         },
       },
