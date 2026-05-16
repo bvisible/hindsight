@@ -21,6 +21,10 @@ const manifest: PaperclipPluginManifestV1 = {
     // from its `originId` (format `<phone>::<email>`) when `bankGranularity`
     // includes `"user"`.
     "issues.read",
+    // NORA fork — fallback when the adapter (e.g. `process`) doesn't propagate
+    // LLM output in `agent.run.finished.payload.output`: pull the agent's own
+    // comments and use them as the retain content.
+    "issue.comments.read",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
